@@ -2,14 +2,14 @@ import React, { useEffect, useState } from "react";
 import Navbar from "../components/Navbar";
 import UploadForm from "../components/UploadForm";
 import api from "../api/axios";
-import '../App.css'; // Make sure your CSS is here
+import "../App.css";
 
 export default function Dashboard() {
-  const [user, setUser] = useState({ name: "User" });
+  const [user] = useState({ name: "User" });
   const [documents, setDocuments] = useState([]);
   const [loading, setLoading] = useState(true);
 
-  // Fetch documents and order by priority (review > ready > pending) and newest first
+  // Fetch documents
   const fetchDocuments = async () => {
     try {
       setLoading(true);
@@ -32,7 +32,10 @@ export default function Dashboard() {
     }
   };
 
-  // Trigger email ingestion
+  useEffect(() => {
+    fetchDocuments();
+  }, []);
+
   const triggerEmailIngestion = async () => {
     try {
       await api.post("/documents/ingest-email");
@@ -44,29 +47,21 @@ export default function Dashboard() {
     }
   };
 
-  useEffect(() => {
-    fetchDocuments();
-  }, []);
-
-  // Trim long summary text
   const getTrimmedSummary = (text, maxLength = 200) => {
     if (!text) return "Summary not available yet.";
     return text.length > maxLength ? text.slice(0, maxLength) + "..." : text;
   };
 
-  // Map status to badge colors
   const statusColors = {
     ready: "bg-green-100 text-green-800",
     pending: "bg-yellow-100 text-yellow-800",
     review: "bg-red-100 text-red-800",
   };
 
-  // -------------------------
-  // Open document in new tab
-  // -------------------------
+  // ✅ THIS is the fix — NO axios, NO blob
   const viewDocument = (docId) => {
-    const url = `/documents/${docId}/file`; // backend endpoint
-    window.open(url, "_blank");
+    const url = `http://localhost:8000/api/v1/documents/${docId}/file`;
+    window.open(url, "_blank", "noopener,noreferrer");
   };
 
   return (
@@ -74,8 +69,6 @@ export default function Dashboard() {
       <Navbar user={user} />
 
       <div className="p-6 space-y-6">
-
-        {/* Header actions */}
         <div className="flex flex-wrap gap-3 justify-between items-center">
           <button
             onClick={triggerEmailIngestion}
@@ -87,7 +80,6 @@ export default function Dashboard() {
           <UploadForm onUpload={fetchDocuments} />
         </div>
 
-        {/* Documents list */}
         <div>
           <h2 className="text-2xl font-bold mb-4">📄 Document History</h2>
 
@@ -96,25 +88,44 @@ export default function Dashboard() {
           ) : documents.length ? (
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
               {documents.map((doc) => (
-                <div
-                  key={doc.id}
-                  className="card cursor-pointer hover:shadow-lg transition"
-                  onClick={() => viewDocument(doc.id)} // <-- open on click
-                >
-                  {/* Header: Filename + Received */}
-                  <div className="card-header">
-                    <h3 className="filename">{doc.filename}</h3>
-                    <span className="received-at">
-                      {new Date(doc.received_at).toLocaleString()}
-                    </span>
+                <div key={doc.id} className="card hover:shadow-lg transition">
+                  <div className="card-header flex justify-between items-center">
+                    <div>
+                      <h3 className="filename">{doc.filename}</h3>
+                      <span className="received-at">
+                        {new Date(doc.received_at).toLocaleString()}
+                      </span>
+                    </div>
+
+                    <div className="flex gap-2">
+                      {/* 👁 VIEW */}
+                      <button
+                        onClick={() =>
+                          window.open(
+                            `http://localhost:8000/api/v1/documents/${doc.id}/file`,
+                            "_blank"
+                          )
+                        }
+                      >
+                        👁 View
+                      </button>
+
+
+                      {/* ⬇ DOWNLOAD */}
+                      <a
+                        href={`http://localhost:8000/api/v1/documents/${doc.id}/file`}
+                        download
+                        className="bg-gray-600 hover:bg-gray-700 text-white px-3 py-1 rounded shadow"
+                      >
+                        ⬇ Download
+                      </a>
+                    </div>
                   </div>
 
-                  {/* Purpose */}
-                  <p className="purpose">
+                  <p className="purpose mt-2">
                     Purpose: <span className="font-medium">{doc.purpose}</span>
                   </p>
 
-                  {/* Status & Priority Badges */}
                   <div className="badges flex gap-2 mt-2">
                     <span className={`badge ${statusColors[doc.routing_status] || ""}`}>
                       {doc.routing_status.toUpperCase()}
@@ -124,7 +135,6 @@ export default function Dashboard() {
                     </span>
                   </div>
 
-                  {/* Summary */}
                   <div className="summary mt-2 text-gray-700">
                     {getTrimmedSummary(doc.summary, 250)}
                   </div>
@@ -135,7 +145,6 @@ export default function Dashboard() {
             <p className="text-gray-600">No documents found.</p>
           )}
         </div>
-
       </div>
     </div>
   );

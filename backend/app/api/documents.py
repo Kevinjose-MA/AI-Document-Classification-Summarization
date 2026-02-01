@@ -9,10 +9,13 @@ from fastapi import APIRouter, UploadFile, File, Form, Depends, BackgroundTasks,
 from fastapi.security import HTTPBearer
 import jwt
 from fastapi.responses import FileResponse
+from fastapi import Response
+from bson import ObjectId
 
 from app.models.models import DocumentModel
 from app.services.ingestion import ingest_upload, ingest_bytes
 from app.core.config import EMAIL_USER, EMAIL_PASS, SECRET_KEY
+
 
 # -------------------------
 # Router & Upload Directory
@@ -101,10 +104,6 @@ def get_document(doc_id: str, user=Depends(get_current_user)):
 # Email ingestion (background)
 # -------------------------
 def fetch_email_attachments(user_id: str):
-    """
-    Connect to Gmail, fetch unread emails, download attachments,
-    and send them to the ingestion pipeline (dedup + clause extraction + summary + routing).
-    """
     try:
         mail = imaplib.IMAP4_SSL("imap.gmail.com")
         mail.login(EMAIL_USER, EMAIL_PASS)
@@ -161,7 +160,6 @@ def fetch_email_attachments(user_id: str):
                                         source="email"
                                     )
 
-                    # mark as read
                     mail.store(num, "+FLAGS", "\\Seen")
                     ingested_email_ids.add(num)
 
@@ -178,9 +176,6 @@ def fetch_email_attachments(user_id: str):
 
 @router.post("/documents/ingest-email")
 def ingest_email(background_tasks: BackgroundTasks, user=Depends(get_current_user)):
-    """
-    Trigger background email ingestion for the logged-in user.
-    """
     background_tasks.add_task(fetch_email_attachments, str(user["user_id"]))
     return {"message": "Email ingestion started in background"}
 
@@ -194,9 +189,6 @@ async def ingest_email_file(
     purpose: str = Form("Email Upload"),
     user=Depends(get_current_user)
 ):
-    """
-    Accepts email attachments or any external file directly.
-    """
     file_bytes = await file.read()
     return ingest_bytes(
         file_bytes=file_bytes,
@@ -207,29 +199,29 @@ async def ingest_email_file(
         source="email"
     )
 
+
 # -------------------------
 # Download / View file
 # -------------------------
-@router.get("/documents/{doc_id}/file")
-def get_document_file(doc_id: str, user=Depends(get_current_user)):
-    doc = DocumentModel.objects(id=doc_id).first()
+@router.get("/documents/{document_id}/file")
+def get_document_file(document_id: str):
+    if not ObjectId.is_valid(document_id):
+        raise HTTPException(status_code=400, detail="Invalid document ID")
+
+    doc = DocumentModel.objects(id=document_id).first()
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
 
-    # RBAC check
-    if user["role"].lower() != "admin" and str(doc.user_id) != str(user["user_id"]):
-        raise HTTPException(status_code=403, detail="Access denied")
-
-    # Use storage_path from ingestion
-    file_path = getattr(doc, "storage_path", None)
-    if not file_path or not os.path.exists(file_path):
-        # fallback: try uploads/<department>/<filename>
-        file_path = os.path.join(UPLOAD_DIR, doc.department or "General", doc.filename)
-        if not os.path.exists(file_path):
-            raise HTTPException(status_code=404, detail="File missing on server")
+    file_path = os.path.abspath(doc.storage_path)
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="File not found")
 
     return FileResponse(
-        file_path,
+        path=file_path,
+        media_type="application/pdf",
         filename=doc.filename,
-        media_type=doc.content_type or "application/octet-stream"
+        headers={
+            "Content-Disposition": f'inline; filename="{doc.filename}"',
+            "Accept-Ranges": "bytes",
+        },
     )
