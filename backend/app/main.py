@@ -3,7 +3,7 @@ from pydantic import BaseModel
 from typing import List, Union, Dict
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.services.extractor import extract_clauses_from_url
+from app.services.extractor import extract_clauses
 from app.services.parser import extract_dynamic_keywords_from_clauses, parse_query_with_dynamic_map
 from sentence_transformers import SentenceTransformer
 from transformers import AutoTokenizer
@@ -847,17 +847,28 @@ async def warmup_model():
             clause_texts = []
 
             for item in raw_clauses:
-                clause = item.get("clause", "").strip()
-                if clause:
-                    tokens = len(tokenizer.tokenize(clause))
+                if isinstance(item, dict):
+                    clause_text = item.get("clause", "").strip()
+                    section = item.get("section") or extract_section_from_clause(clause_text)
+                    tags = item.get("tags") or extract_tags(clause_text)
+                elif isinstance(item, str):
+                    clause_text = item.strip()
+                    section = extract_section_from_clause(clause_text)
+                    tags = extract_tags(clause_text)
+                else:
+                    continue  # skip invalid items
+
+                if clause_text:
+                    tokens = len(tokenizer.tokenize(clause_text))
                     if tokens <= 512:
                         enriched = {
-                            "clause": clause,
-                            "section": item.get("section") or extract_section_from_clause(clause),
-                            "tags": item.get("tags") or extract_tags(clause)
+                            "clause": clause_text,
+                            "section": section,
+                            "tags": tags
                         }
                         valid_clauses.append(enriched)
                         clause_texts.append(enriched)
+
 
             if not clause_texts:
                 print(f"⚠ No valid clauses in {filename}")

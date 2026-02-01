@@ -7,11 +7,10 @@ from datetime import datetime, timedelta
 from app.models.models import UserModel
 from app.core.config import SECRET_KEY
 
-
 router = APIRouter()
 
 # ----------------------
-# Password Context (FIX)
+# Password Context
 # ----------------------
 pwd_context = CryptContext(
     schemes=["bcrypt_sha256"],
@@ -25,6 +24,7 @@ class RegisterSchema(BaseModel):
     email: str
     password: str = Field(min_length=8, max_length=128)
     name: str
+    role: str = Field(default="user")  # optional, default user
 
 
 class LoginSchema(BaseModel):
@@ -46,9 +46,10 @@ def verify_password(password: str, hashed: str) -> bool:
 # ----------------------
 # JWT Helper
 # ----------------------
-def create_token(user_id: str) -> str:
+def create_token(user_id: str, role: str) -> str:
     payload = {
         "user_id": str(user_id),
+        "role": role,  # add role to JWT for RBAC
         "exp": datetime.utcnow() + timedelta(days=1),
     }
     return jwt.encode(payload, SECRET_KEY, algorithm="HS256")
@@ -62,17 +63,30 @@ def register(data: RegisterSchema):
     if UserModel.objects(email=data.email).first():
         raise HTTPException(status_code=400, detail="Email already registered")
 
+    # Generate username from email (before @)
+    username = data.email.split("@")[  0]
+
+    # Ensure username is unique
+    suffix = 1
+    base_username = username
+    while UserModel.objects(username=username).first():
+        username = f"{base_username}{suffix}"
+        suffix += 1
+
     user = UserModel(
         email=data.email,
         password=hash_password(data.password),
         name=data.name,
+        role=data.role.lower(),
+        username=username
     )
     user.save()
 
     return {
-        "token": create_token(user.id),
-        "user": {"email": user.email, "name": user.name},
+        "token": create_token(user.id, user.role),
+        "user": {"email": user.email, "name": user.name, "role": user.role, "username": user.username},
     }
+
 
 
 @router.post("/auth/login")
@@ -83,6 +97,6 @@ def login(data: LoginSchema):
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
     return {
-        "token": create_token(user.id),
-        "user": {"email": user.email, "name": user.name},
+        "token": create_token(user.id, user.role),
+        "user": {"email": user.email, "name": user.name, "role": user.role},
     }
