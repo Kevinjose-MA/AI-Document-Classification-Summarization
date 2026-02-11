@@ -5,6 +5,10 @@ from datetime import datetime
 from fastapi import UploadFile
 from app.models.models import DocumentModel
 from app.services.extractor import extract_clauses
+import logging
+
+logger = logging.getLogger("INGEST")
+
 
 UPLOAD_DIR = "uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
@@ -82,12 +86,13 @@ def ingest_bytes(file_bytes: bytes, filename: str, user_id: str, purpose: str,
 # -------------------------
 def ingest_file(file_bytes: bytes, filename: str, user_id: str, purpose: str,
                 content_type: str = None, source: str = "manual"):
-
+    logger.info(f"[INGEST] Ingestion started | file={filename} | source={source} | user={user_id}")
     file_hash = compute_file_hash(file_bytes)
 
     # ---- Dedup ----
     existing = DocumentModel.objects(file_hash=file_hash, user_id=str(user_id)).first()
     if existing:
+        logger.info(f"[INGEST] Duplicate detected | file={filename} | document_id={existing.id}")
         return {
             "status": "duplicate",
             "document_id": str(existing.id),
@@ -98,6 +103,8 @@ def ingest_file(file_bytes: bytes, filename: str, user_id: str, purpose: str,
     encrypted_external = False
     if filename.lower().endswith(".pdf"):
         encrypted_external = is_encrypted_pdf(file_bytes)
+        if encrypted_external:
+            logger.info(f"[INGEST] Encrypted PDF detected | file={filename}")
 
     # ---- Extraction / metadata ----
     if encrypted_external:
@@ -111,15 +118,19 @@ def ingest_file(file_bytes: bytes, filename: str, user_id: str, purpose: str,
     else:
         # temporary save for extraction
         temp_path = save_file(file_bytes, filename, department="__temp__")
+        logger.info(f"[INGEST] Clause extraction started | file={filename}")
         enriched = extract_clauses(temp_path, enrich=True)
         metadata = enriched.get("metadata", {})
         clauses = enriched.get("clauses", [])
+        logger.info(f"[INGEST] Clause extraction completed | clauses={len(clauses)}")
         os.remove(temp_path)
 
     department = metadata.get("department", "General")
+    logger.info(f"[INGEST] Routed to department: {department}")
 
     # ---- Final save (department-based) ----
     file_path = save_file(file_bytes, filename, department=department)
+    logger.info(f"[INGEST] File saved | path={file_path}")
 
     doc = DocumentModel(
         user_id=str(user_id),
@@ -140,7 +151,10 @@ def ingest_file(file_bytes: bytes, filename: str, user_id: str, purpose: str,
         routing_status=metadata.get("routing_status", "review"),
         status="locked" if encrypted_external else "ready"
     )
+    logger.info("[INGEST] Persisting document to MongoDB")
     doc.save()
+
+    logger.info(f"[INGEST] Ingestion completed successfully | document_id={doc.id}")
 
     return {
         "status": "created",

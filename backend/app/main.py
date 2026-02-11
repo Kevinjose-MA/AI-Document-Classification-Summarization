@@ -17,6 +17,7 @@ import re
 import asyncio
 import hashlib
 import time
+import logging
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import requests
@@ -75,6 +76,13 @@ if os.path.exists(QA_CACHE_FILE):
 class HackRxRequest(BaseModel):
     documents: Union[str, List[str]]
     questions: List[str]
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s"
+)
+
+logger = logging.getLogger(__name__)
 
 # --- HackRx Output Formatter ---
 def format_hackrx_answer(answer_type: str, value: str) -> str:
@@ -826,7 +834,9 @@ async def hackrx_run(req: HackRxRequest):
 
 @app.on_event("startup")
 async def warmup_model():
-    print("🔥 Warming up Gemini and FAISS...")
+    logger.info("[INGEST] Application startup triggered")
+    logger.info("[INGEST] Email ingestion & intelligence warmup started")
+
     app.state.cache_indices = {}
 
     clause_dir = "clause_cache"
@@ -840,7 +850,7 @@ async def warmup_model():
                 with open(path, "r", encoding="utf-8") as f:
                     raw_clauses = json.load(f)
             except Exception:
-                print(f"❌ Failed to load {filename}")
+                logger.error(f"[INGEST] Failed to load clause cache: {filename}")
                 continue
 
             valid_clauses = []
@@ -856,7 +866,7 @@ async def warmup_model():
                     section = extract_section_from_clause(clause_text)
                     tags = extract_tags(clause_text)
                 else:
-                    continue  # skip invalid items
+                    continue
 
                 if clause_text:
                     tokens = len(tokenizer.tokenize(clause_text))
@@ -869,22 +879,26 @@ async def warmup_model():
                         valid_clauses.append(enriched)
                         clause_texts.append(enriched)
 
-
             if not clause_texts:
-                print(f"⚠ No valid clauses in {filename}")
+                logger.warning(f"[INGEST] No valid clauses found in {filename}")
                 continue
 
-            embeddings = model.encode([c["clause"] for c in clause_texts], show_progress_bar=False)
+            embeddings = model.encode(
+                [c["clause"] for c in clause_texts],
+                show_progress_bar=False
+            )
+
             index = faiss.IndexFlatL2(embeddings.shape[1])
             index.add(np.array(embeddings).astype(np.float32))
+
             urlhash = filename.replace(".json", "")
             app.state.cache_indices[urlhash] = {
                 "index": index,
                 "clauses": clause_texts
             }
-            print(f"✅ Loaded FAISS index for {filename} with {len(clause_texts)} enriched clauses")
 
-if __name__ == "__main__":
-    import uvicorn
-    port = int(os.getenv("PORT", 8000))
-    uvicorn.run("app.main:app", host="0.0.0.0", port=port, reload=True)
+            logger.info(
+                f"[INGEST] FAISS index loaded | source=cache | file={filename} | clauses={len(clause_texts)}"
+            )
+
+    logger.info("[INGEST] Startup ingestion & warmup completed")
