@@ -1,29 +1,18 @@
 import React, { useEffect, useState } from "react";
-import Navbar from "../components/Navbar";
-import UploadForm from "../components/UploadForm";
+import { useNavigate } from "react-router-dom";
 import api from "../api/axios";
-import "../App.css";
+import StatusBadge from "../components/StatusBadge";
 
 export default function Dashboard() {
-  const [user] = useState({ name: "User" });
+  const navigate = useNavigate();
   const [documents, setDocuments] = useState([]);
   const [loading, setLoading] = useState(true);
 
-  // Fetch documents
   const fetchDocuments = async () => {
     try {
       setLoading(true);
       const res = await api.get("/documents");
-
-      const priorityOrder = { review: 3, ready: 2, pending: 1 };
-      const orderedDocs = res.data.sort((a, b) => {
-        const aPriority = priorityOrder[a.routing_status] || 0;
-        const bPriority = priorityOrder[b.routing_status] || 0;
-        if (bPriority !== aPriority) return bPriority - aPriority;
-        return new Date(b.received_at) - new Date(a.received_at);
-      });
-
-      setDocuments(orderedDocs);
+      setDocuments(res.data);
     } catch (err) {
       console.error(err);
       alert("Failed to fetch documents");
@@ -36,116 +25,130 @@ export default function Dashboard() {
     fetchDocuments();
   }, []);
 
-  const triggerEmailIngestion = async () => {
-    try {
-      await api.post("/documents/ingest-email");
-      alert("Email ingestion started");
-      fetchDocuments();
-    } catch (err) {
-      console.error(err);
-      alert("Failed to start email ingestion");
-    }
-  };
+  // ===== KPI Calculations =====
+  const total = documents.length;
+  const ready = documents.filter(
+    (d) => d.routing_status?.toLowerCase() === "ready"
+  ).length;
+  const pending = documents.filter(
+    (d) => d.routing_status?.toLowerCase() === "pending"
+  ).length;
+  const review = documents.filter(
+    (d) => d.routing_status?.toLowerCase() === "review"
+  ).length;
 
-  const getTrimmedSummary = (text, maxLength = 200) => {
-    if (!text) return "Summary not available yet.";
-    return text.length > maxLength ? text.slice(0, maxLength) + "..." : text;
-  };
+  return (
+    <div className="space-y-10">
 
-  const statusColors = {
-    ready: "bg-green-100 text-green-800",
-    pending: "bg-yellow-100 text-yellow-800",
-    review: "bg-red-100 text-red-800",
-  };
+      {/* ===== KPI SECTION ===== */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
+        <KpiCard title="Total Documents" value={total} color="blue" />
+        <KpiCard title="Ready" value={ready} color="green" />
+        <KpiCard title="Pending" value={pending} color="yellow" />
+        <KpiCard title="Needs Review" value={review} color="red" />
+      </div>
 
-  // ✅ THIS is the fix — NO axios, NO blob
-  const viewDocument = (docId) => {
-    const url = `http://localhost:8000/api/v1/documents/${docId}/file`;
-    window.open(url, "_blank", "noopener,noreferrer");
+      {/* ===== RECENT DOCUMENTS ===== */}
+      <div className="bg-white rounded-xl shadow-sm border p-6">
+
+        <div className="flex justify-between items-center mb-6">
+          <h2 className="text-2xl font-semibold text-gray-800">
+            Recent Documents
+          </h2>
+
+          <button
+            onClick={() => navigate("/documents")}
+            className="border border-gray-300 text-gray-700 px-4 py-2 rounded-lg text-sm hover:bg-gray-100 transition duration-200"
+          >
+            View All →
+          </button>
+        </div>
+
+        {loading ? (
+          <div className="py-12 text-center text-gray-500 animate-pulse">
+            Loading documents...
+          </div>
+        ) : documents.length === 0 ? (
+          <div className="py-12 text-center text-gray-500">
+            No documents uploaded yet.
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-left border-collapse">
+              <thead>
+                <tr className="text-gray-500 text-sm border-b">
+                  <th className="py-3 font-medium">File Name</th>
+                  <th className="font-medium">Status</th>
+                  <th className="font-medium">Routing</th>
+                  <th className="font-medium">Date</th>
+                  <th></th>
+                </tr>
+              </thead>
+
+              <tbody>
+                {[...documents]
+                  .sort(
+                    (a, b) =>
+                      new Date(b.received_at) - new Date(a.received_at)
+                  )
+                  .slice(0, 5)
+                  .map((doc) => (
+                    <tr
+                      key={doc.id}
+                      className="border-b hover:bg-gray-50 transition cursor-pointer"
+                      onClick={() => navigate(`/documents/${doc.id}`)}
+                    >
+                      <td className="py-4 font-medium text-gray-800">
+                        {doc.filename}
+                      </td>
+
+                      <td>
+                        <StatusBadge status={doc.status} />
+                      </td>
+
+                      <td>
+                        <StatusBadge status={doc.routing_status} />
+                      </td>
+
+                      <td className="text-sm text-gray-500">
+                        {new Date(doc.received_at).toLocaleDateString()}
+                      </td>
+
+                      <td className="text-right">
+                        <span className="text-blue-600 text-sm font-medium">
+                          View →
+                        </span>
+                      </td>
+                    </tr>
+                  ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+    </div>
+  );
+}
+
+
+/* ===== KPI CARD COMPONENT ===== */
+function KpiCard({ title, value, color = "blue" }) {
+  const colorMap = {
+    blue: "text-blue-600",
+    green: "text-green-600",
+    yellow: "text-yellow-500",
+    red: "text-red-600",
   };
 
   return (
-    <div className="bg-gray-100 min-h-screen">
-      <Navbar user={user} />
-
-      <div className="p-6 space-y-6">
-        <div className="flex flex-wrap gap-3 justify-between items-center">
-          <button
-            onClick={triggerEmailIngestion}
-            className="bg-green-600 hover:bg-green-700 text-white px-5 py-2 rounded-lg shadow"
-          >
-            📤 Ingest Emails
-          </button>
-
-          <UploadForm onUpload={fetchDocuments} />
-        </div>
-
-        <div>
-          <h2 className="text-2xl font-bold mb-4">📄 Document History</h2>
-
-          {loading ? (
-            <p className="text-gray-600">Loading documents...</p>
-          ) : documents.length ? (
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
-              {documents.map((doc) => (
-                <div key={doc.id} className="card hover:shadow-lg transition">
-                  <div className="card-header flex justify-between items-center">
-                    <div>
-                      <h3 className="filename">{doc.filename}</h3>
-                      <span className="received-at">
-                        {new Date(doc.received_at).toLocaleString()}
-                      </span>
-                    </div>
-
-                    <div className="flex gap-2">
-                      {/* 👁 VIEW */}
-                      <button
-                        onClick={() =>
-                          window.open(
-                            `http://localhost:8000/api/v1/documents/${doc.id}/file`,
-                            "_blank"
-                          )
-                        }
-                      >
-                        👁 View
-                      </button>
-
-
-                      {/* ⬇ DOWNLOAD */}
-                      <a
-                        href={`http://localhost:8000/api/v1/documents/${doc.id}/file`}
-                        download
-                        className="bg-gray-600 hover:bg-gray-700 text-white px-3 py-1 rounded shadow"
-                      >
-                        ⬇ Download
-                      </a>
-                    </div>
-                  </div>
-
-                  <p className="purpose mt-2">
-                    Purpose: <span className="font-medium">{doc.purpose}</span>
-                  </p>
-
-                  <div className="badges flex gap-2 mt-2">
-                    <span className={`badge ${statusColors[doc.routing_status] || ""}`}>
-                      {doc.routing_status.toUpperCase()}
-                    </span>
-                    <span className={`badge ${statusColors[doc.status] || ""}`}>
-                      {doc.status.toUpperCase()}
-                    </span>
-                  </div>
-
-                  <div className="summary mt-2 text-gray-700">
-                    {getTrimmedSummary(doc.summary, 250)}
-                  </div>
-                </div>
-              ))}
-            </div>
-          ) : (
-            <p className="text-gray-600">No documents found.</p>
-          )}
-        </div>
-      </div>
+    <div className="bg-white rounded-xl shadow-sm border p-6 text-center hover:shadow-md transition duration-200">
+      <p className="text-sm text-gray-500 mb-2 uppercase tracking-wide">
+        {title}
+      </p>
+      <h3 className={`text-4xl font-bold ${colorMap[color]}`}>
+        {value}
+      </h3>
     </div>
   );
 }

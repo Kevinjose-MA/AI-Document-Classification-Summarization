@@ -1,50 +1,95 @@
 import React, { useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, Link } from "react-router-dom";
 import api from "../api/axios";
 
 export default function Login() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [loading, setLoading] = useState(false);
+
   const navigate = useNavigate();
 
   const handleLogin = async () => {
+    if (!email || !password || loading) return;
+
     try {
-      const res = await api.post("/auth/login", { email, password });
+      setLoading(true);
+
+      const res = await api.post("/auth/login", {
+        email,
+        password,
+      });
+
       localStorage.setItem("token", res.data.token);
-      navigate("/");
+
+      navigate("/dashboard");
     } catch (err) {
       console.error(err);
       alert("Invalid credentials");
+    } finally {
+      setLoading(false);
     }
   };
 
   return (
-    <div className="flex items-center justify-center h-screen bg-gray-100">
-      <div className="bg-white p-8 rounded shadow-md w-96">
-        <h1 className="text-2xl font-bold mb-4">Login</h1>
-        <input
-          type="email"
-          placeholder="Email"
-          value={email}
-          onChange={(e) => setEmail(e.target.value)}
-          className="border p-2 rounded w-full mb-3"
-        />
-        <input
-          type="password"
-          placeholder="Password"
-          value={password}
-          onChange={(e) => setPassword(e.target.value)}
-          className="border p-2 rounded w-full mb-3"
-        />
+    <div className="min-h-screen flex items-center justify-center bg-gray-100 px-4">
+      
+      <div className="bg-white w-full max-w-md p-8 rounded-2xl shadow-sm border space-y-6">
+
+        <div>
+          <h1 className="text-3xl font-bold text-gray-800">
+            Welcome Back
+          </h1>
+          <p className="text-gray-500 mt-1 text-sm">
+            Login to access your documents.
+          </p>
+        </div>
+
+        <div className="space-y-4">
+          <input
+            type="email"
+            placeholder="Email"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm
+                       focus:outline-none focus:ring-2 focus:ring-blue-500
+                       focus:border-blue-500 transition"
+          />
+
+          <input
+            type="password"
+            placeholder="Password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm
+                       focus:outline-none focus:ring-2 focus:ring-blue-500
+                       focus:border-blue-500 transition"
+          />
+        </div>
+
         <button
           onClick={handleLogin}
-          className="bg-blue-600 text-white px-4 py-2 rounded w-full"
+          disabled={loading || !email || !password}
+          className={`w-full py-2 rounded-lg font-medium transition duration-200
+            ${
+              loading || !email || !password
+                ? "bg-gray-300 text-gray-500 cursor-not-allowed"
+                : "bg-blue-600 text-white hover:bg-blue-700 active:scale-95"
+            }`}
         >
-          Login
+          {loading ? "Logging in..." : "Login"}
         </button>
-        <p className="mt-3 text-sm">
-          Don't have an account? <a href="/register" className="text-blue-600">Register</a>
+
+        <p className="text-sm text-gray-600 text-center">
+          Don't have an account?{" "}
+          <Link
+            to="/register"
+            className="text-blue-600 hover:underline font-medium"
+          >
+            Register
+          </Link>
         </p>
+
       </div>
     </div>
   );

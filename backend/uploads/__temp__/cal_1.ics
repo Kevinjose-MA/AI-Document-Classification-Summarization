@@ -1,0 +1,19 @@
+BEGIN:VCALENDAR
+VERSION:2.0
+METHOD:REQUEST
+PRODID:-//Charles Oduk//Tech Events//EN
+BEGIN:VEVENT
+DTSTART;TZID=Asia/Kolkata:20260212T110050
+DTEND;TZID=Asia/Kolkata:20260215T235957
+DTSTAMP:20260212T110050
+SUMMARY:ET Gen AI Hackathon
+SEQUENCE:0
+ORGANIZER;CN=ET:mailto:noreply@unstop.com
+UID:un698d709fb23f41770877087noreply@unstop.com
+URL:https://unstop.com/competitions/et-gen-ai-hackathon-economic-times-1608780
+STATUS:CONFIRMED
+DESCRIPTION:ET Gen AI Hackathon
+LAST-MODIFIED:20260212T110050
+LOCATION:https://unstop.com/competitions/et-gen-ai-hackathon-economic-times-1608780
+END:VEVENT
+END:VCALENDAR

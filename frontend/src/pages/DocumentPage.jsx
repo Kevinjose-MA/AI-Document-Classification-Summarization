@@ -1,79 +1,62 @@
 import { useEffect, useState } from "react";
-import axios from "axios";
+import api from "../api/axios";
+import DocumentCard from "../components/DocumentCard";
 
 export default function DocumentsPage() {
   const [documents, setDocuments] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(null);
+
+  const fetchDocuments = async () => {
+    try {
+      setLoading(true);
+      const res = await api.get("/documents");
+      setDocuments(res.data);
+    } catch (err) {
+      console.error(err);
+      alert("Failed to fetch documents");
+    } finally {
+      setLoading(false);
+    }
+  };
 
   useEffect(() => {
-    const fetchDocuments = async () => {
-      try {
-        const token = localStorage.getItem("token");
-        const res = await axios.get("http://localhost:8000/api/v1/documents", {
-          headers: {
-            Authorization: `Bearer ${token}`,
-          },
-        });
-        setDocuments(res.data);
-      } catch (err) {
-        setError("Failed to load documents");
-      } finally {
-        setLoading(false);
-      }
-    };
-
     fetchDocuments();
   }, []);
 
-  if (loading) return <p className="p-4">Loading documents…</p>;
-  if (error) return <p className="p-4 text-red-500">{error}</p>;
-
   return (
-    <div className="p-6 max-w-5xl mx-auto">
-      <h1 className="text-2xl font-bold mb-6">📄 Document History</h1>
+    <div className="space-y-8">
 
-      {documents.length === 0 ? (
-        <p>No documents uploaded yet.</p>
+      {/* Header */}
+      <div>
+        <h2 className="text-3xl font-bold text-gray-800">
+          All Documents
+        </h2>
+        <p className="text-gray-500 mt-1">
+          View and manage all uploaded documents.
+        </p>
+      </div>
+
+      {/* Content */}
+      {loading ? (
+        <div className="text-gray-500 animate-pulse">
+          Loading documents...
+        </div>
+      ) : documents.length === 0 ? (
+        <div className="text-gray-500">
+          No documents uploaded yet.
+        </div>
       ) : (
-        <div className="space-y-4">
-          {documents.map((doc) => (
-            <div
-              key={doc.id}
-              className="bg-white rounded-2xl shadow p-5 border"
-            >
-              <div className="flex justify-between items-center mb-2">
-                <h2 className="font-semibold text-lg">{doc.filename}</h2>
-                <span className="text-sm text-gray-500">
-                  {new Date(doc.received_at).toLocaleString()}
-                </span>
-              </div>
-
-              <p className="text-sm text-gray-600 mb-2">
-                Purpose: {doc.purpose}
-              </p>
-
-              <span
-                className={`inline-block mb-3 px-3 py-1 text-xs rounded-full ${
-                  doc.status === "ready"
-                    ? "bg-green-100 text-green-700"
-                    : "bg-yellow-100 text-yellow-700"
-                }`}
-              >
-                {doc.status}
-              </span>
-
-              <div className="bg-gray-50 rounded-xl p-4">
-                <p className="text-sm font-medium mb-1">Summary</p>
-                <p className="text-sm text-gray-700 leading-relaxed">
-                  {doc.summary || "Summary not available yet."}
-                </p>
-              </div>
-            </div>
-          ))}
+        <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-6">
+          {[...documents]
+            .sort(
+              (a, b) =>
+                new Date(b.received_at) - new Date(a.received_at)
+            )
+            .map((doc) => (
+              <DocumentCard key={doc.id} doc={doc} />
+            ))}
         </div>
       )}
     </div>
   );
 }
-
