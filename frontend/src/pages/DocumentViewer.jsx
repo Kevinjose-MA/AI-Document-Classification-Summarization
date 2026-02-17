@@ -40,7 +40,24 @@ export default function DocumentViewer() {
       </div>
     );
 
-  const fileUrl = doc.file_url || doc.file_path || doc.url;
+    let summaryData = null;
+
+  if (doc.summary) {
+    if (typeof doc.summary === "object") {
+      summaryData = doc.summary;
+    } else {
+      try {
+        summaryData = JSON.parse(doc.summary);
+      } catch {
+        summaryData = null;
+      }
+    }
+  }
+
+
+  const fileUrl = `http://localhost:8000/api/v1/documents/${doc.id}/preview`;
+
+
 
   const fileExtension = doc.filename?.split(".").pop()?.toLowerCase();
   const isPDF = fileExtension === "pdf";
@@ -111,12 +128,17 @@ export default function DocumentViewer() {
         <div className="bg-white border rounded-xl shadow-sm p-6 space-y-6">
 
           {/* Metadata */}
-          <div>
-            <h2 className="text-xl font-bold text-gray-800 mb-2">
-              {doc.filename}
-            </h2>
+          <div className="min-w-0">
+            <div className="min-w-0">
+              <h2
+                className="text-xl font-bold text-gray-800 mb-2
+                          break-all"
+              >
+                {doc.filename}
+              </h2>
+            </div>
 
-            <div className="flex gap-2 mb-4">
+            <div className="flex gap-2 mb-4 flex-wrap">
               <StatusBadge status={doc.status} />
               <StatusBadge status={doc.routing_status} />
             </div>
@@ -128,17 +150,58 @@ export default function DocumentViewer() {
                 : "N/A"}
             </p>
           </div>
-
+          
           {/* AI Summary */}
           <div>
             <h3 className="font-semibold text-gray-700 mb-2">
               AI Summary
             </h3>
 
-            <div className="bg-gray-50 border rounded-lg p-4 text-sm text-gray-700 leading-relaxed">
-              {doc.summary ||
-                "No summary available for this document."}
+            <div className="bg-gray-50 border rounded-lg p-4 text-sm text-gray-700 space-y-4">
+
+              {!summaryData && (
+                <div className="text-gray-500">
+                  {doc.summary || "No summary available for this document."}
+                </div>
+              )}
+
+              {summaryData && (
+                <>
+                  {/* Purpose */}
+                  <div>
+                    <h4 className="font-semibold text-gray-800 mb-1">
+                      Purpose
+                    </h4>
+                    <p>{summaryData.purpose}</p>
+                  </div>
+
+                  {/* Key Points */}
+                  {summaryData.key_points?.length > 0 && (
+                    <div>
+                      <h4 className="font-semibold text-gray-800 mb-1">
+                        Key Points
+                      </h4>
+                      <ul className="list-disc ml-5 space-y-1">
+                        {summaryData.key_points.map((point, idx) => (
+                          <li key={idx}>{point}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+
+                  {/* Risks */}
+                  {summaryData.risks_or_implications && (
+                    <div>
+                      <h4 className="font-semibold text-gray-800 mb-1">
+                        Risks / Implications
+                      </h4>
+                      <p>{summaryData.risks_or_implications}</p>
+                    </div>
+                  )}
+                </>
+              )}
             </div>
+
           </div>
 
         </div>

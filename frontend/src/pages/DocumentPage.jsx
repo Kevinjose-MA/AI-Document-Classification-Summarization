@@ -46,14 +46,16 @@ export default function DocumentsPage() {
           No documents uploaded yet.
         </div>
       ) : (
-        <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-6">
-          {[...documents]
+        <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-6 auto-rows-fr">
+          {documents
             .sort(
               (a, b) =>
                 new Date(b.received_at) - new Date(a.received_at)
             )
             .map((doc) => (
-              <DocumentCard key={doc.id} doc={doc} />
+              <div key={doc.id} className="min-w-0">
+                <DocumentCard doc={doc} />
+              </div>
             ))}
         </div>
       )}

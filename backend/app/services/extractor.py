@@ -2,6 +2,8 @@ import mimetypes
 import fitz
 import docx
 import email
+from PIL import Image
+import pytesseract
 from email import policy
 from bs4 import BeautifulSoup
 from io import BytesIO
@@ -40,6 +42,19 @@ def extract_text_from_eml(file_bytes: bytes) -> str:
             if part.get_content_type() == "text/html":
                 return BeautifulSoup(part.get_content(), "html.parser").get_text()
     return msg.get_content()
+
+# -------------------------
+# Text extraction from image
+# -------------------------
+
+def extract_text_from_image(file_bytes: bytes) -> str:
+    try:
+        image = Image.open(BytesIO(file_bytes))
+        text = pytesseract.image_to_string(image)
+        return text
+    except Exception:
+        return ""
+
 
 
 # -------------------------
@@ -122,25 +137,43 @@ def split_into_clauses(text: str):
 # -------------------------
 # Summary generation
 # -------------------------
-def generate_summary(text: str) -> str:
+def generate_summary(text: str) -> dict:
+    if not text or len(text.strip()) < 50:
+        return {
+            "purpose": "Insufficient content available.",
+            "key_points": [],
+            "risks_or_implications": ""
+        }
+
     prompt = f"""
 You are an enterprise document analyst.
 
-Summarize the document below in **3–5 clear sentences**.
-Focus on:
-- Purpose of the document
-- Key obligations, dates, or decisions
-- Any sensitive or legal implications
+Analyze the document and return ONLY valid JSON:
 
-Avoid generic phrases.
-Be precise and readable for business users.
+{{
+  "purpose": "...",
+  "key_points": ["...", "..."],
+  "risks_or_implications": "..."
+}}
+
+Do not include explanations.
+Return strictly valid JSON.
 
 Document:
-{text}
+{text[:8000]}
 """
 
-    response = generate_text_completion(prompt, max_tokens=200)
-    return response.strip()
+    response = generate_text_completion(prompt, max_tokens=300)
+
+    try:
+        return json.loads(response)
+    except Exception:
+        # fallback protection
+        return {
+            "purpose": response.strip(),
+            "key_points": [],
+            "risks_or_implications": ""
+        }
 
 
 # -------------------------
@@ -161,6 +194,8 @@ def extract_clauses(file_path: str, enrich=True):
         raw_text = extract_text_from_txt(file_bytes)
     elif ext == ".eml":
         raw_text = extract_text_from_eml(file_bytes)
+    elif ext in [".png", ".jpg", ".jpeg"]:
+        raw_text = extract_text_from_image(file_bytes)
     else:
         raw_text = extract_text_from_pdf(file_bytes)  # fallback
 

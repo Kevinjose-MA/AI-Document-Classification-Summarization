@@ -62,7 +62,7 @@ class DocumentModel(Document):
     # ------------------------------
     # New metadata fields
     # ------------------------------
-    summary = StringField()
+    summary = DictField()
     department = StringField()                    # HR / Legal / Finance / etc
     sensitivity = StringField()                   # low / medium / high
     routing_status = StringField()                # routed / restricted / pending

@@ -18,15 +18,23 @@ import asyncio
 import hashlib
 import time
 import logging
+import mimetypes
+
+
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import requests
+from fastapi import HTTPException
+from fastapi.responses import FileResponse
+import os
 from bs4 import BeautifulSoup
 from urllib.parse import urlparse  
 
 from app.api.documents import router as documents_router
 from app.core.config import init_db
 from app.api.auth import router as auth_router
+from app.models.models import DocumentModel
+
 
 
 
@@ -902,3 +910,29 @@ async def warmup_model():
             )
 
     logger.info("[INGEST] Startup ingestion & warmup completed")
+
+@app.get("/api/v1/documents/{file_id}/preview")
+def preview_document(file_id: str):
+
+    document = DocumentModel.objects(id=file_id).first()
+
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    if not document.storage_path:
+        raise HTTPException(status_code=404, detail="File path missing")
+
+    if not os.path.exists(document.storage_path):
+        raise HTTPException(status_code=404, detail="File not found on disk")
+
+    mime_type, _ = mimetypes.guess_type(document.storage_path)
+
+    return FileResponse(
+        path=document.storage_path,
+        media_type=mime_type or "application/octet-stream",
+        headers={
+            "Content-Disposition": "inline"
+        }
+    )
+
+
