@@ -34,6 +34,9 @@ from app.api.documents import router as documents_router
 from app.core.config import init_db
 from app.api.auth import router as auth_router
 from app.models.models import DocumentModel
+from app.api.documents import fetch_email_attachments
+
+
 
 
 
@@ -908,6 +911,7 @@ async def warmup_model():
             logger.info(
                 f"[INGEST] FAISS index loaded | source=cache | file={filename} | clauses={len(clause_texts)}"
             )
+    fetch_email_attachments(user_id="system")
 
     logger.info("[INGEST] Startup ingestion & warmup completed")
 
