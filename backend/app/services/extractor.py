@@ -146,35 +146,70 @@ def generate_summary(text: str) -> dict:
         }
 
     prompt = f"""
-You are an enterprise document analyst.
+    You are an enterprise document intelligence system.
 
-Analyze the document and return ONLY valid JSON:
+    Your task is to determine the PURPOSE and INTENT of this document.
 
-{{
-  "purpose": "...",
-  "key_points": ["...", "..."],
-  "risks_or_implications": "..."
-}}
+    Focus on:
+    - Why this document exists
+    - Why it would be sent or shared
+    - What the sender or issuer intends
 
-Do not include explanations.
-Return strictly valid JSON.
+    Do NOT describe the document format.
+    Do NOT say "This document is a..."
+    Instead, explain the underlying purpose.
 
-Document:
-{text[:8000]}
-"""
+    Return in this format:
 
-    response = generate_text_completion(prompt, max_tokens=300)
+    Purpose:
+    A clear explanation of the intent behind the document.
 
-    try:
-        return json.loads(response)
-    except Exception:
-        # fallback protection
+    Key Points:
+    - 3 to 5 important supporting points.
+
+    Risks or Implications:
+    Any obligations, responsibilities, or risks involved.
+
+    Return plain text only.
+    Do not use JSON.
+    Do not use markdown.
+
+    Document:
+    {text[:4000]}
+    """
+
+
+    response = generate_text_completion(prompt, max_tokens=500)
+    clean = response.strip()
+
+    # 🔒 Fallback protection
+    if not clean:
         return {
-            "purpose": response.strip(),
+            "purpose": "This document contains structured policy or agreement information.",
             "key_points": [],
             "risks_or_implications": ""
         }
 
+    # 🔎 Parse structured sections safely
+    purpose_match = re.search(r"Purpose:\s*(.*?)(?=Key Points:|$)", clean, re.DOTALL | re.IGNORECASE)
+    key_points_match = re.search(r"Key Points:\s*(.*?)(?=Risks|$)", clean, re.DOTALL | re.IGNORECASE)
+    risks_match = re.search(r"Risks.*?:\s*(.*)", clean, re.DOTALL | re.IGNORECASE)
+
+    purpose = purpose_match.group(1).strip() if purpose_match else clean.strip()
+    key_points_raw = key_points_match.group(1).strip() if key_points_match else ""
+    risks = risks_match.group(1).strip() if risks_match else ""
+
+    key_points = [
+        kp.strip("-• ").strip()
+        for kp in key_points_raw.split("\n")
+        if kp.strip()
+    ]
+
+    return {
+        "purpose": purpose,
+        "key_points": key_points,
+        "risks_or_implications": risks
+    }
 
 # -------------------------
 # Main entry

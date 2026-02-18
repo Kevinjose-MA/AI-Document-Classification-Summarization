@@ -15,6 +15,7 @@ from bson import ObjectId
 from app.models.models import DocumentModel
 from app.services.ingestion import ingest_upload, ingest_bytes
 from app.core.config import EMAIL_USER, EMAIL_PASS, SECRET_KEY
+from app.api.auth import get_current_user_id
 
 
 # -------------------------
@@ -225,3 +226,22 @@ def get_document_file(document_id: str):
             "Accept-Ranges": "bytes",
         },
     )
+
+# -------------------------
+# Delete File
+# -------------------------
+
+@router.delete("/documents/{document_id}")
+def delete_document(document_id: str, user_id: str = Depends(get_current_user_id)):
+
+    document = DocumentModel.objects(
+        id=document_id,
+        user_id=str(user_id)
+    ).first()
+
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    document.delete()
+
+    return {"message": "Document deleted successfully"}

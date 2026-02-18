@@ -152,7 +152,7 @@ async def call_llm_batch(prompts: List[str]) -> Dict[str, Dict[str, str]]:
     return results
 
 
-def generate_text_completion(prompt: str, max_tokens: int = 300) -> str:
+def generate_text_completion(prompt: str, max_tokens: int = 500) -> str:
     """
     Wrapper for a simple text completion (for summarizer)
     """
@@ -165,10 +165,23 @@ def generate_text_completion(prompt: str, max_tokens: int = 300) -> str:
                 "max_output_tokens": max_tokens
             }
         )
-        text = getattr(response, "text", None)
-        if not text:
-            text = response.candidates[0].content.parts[0].text
+
+        # 🔍 SAFELY extract content
+        text = None
+
+        if hasattr(response, "text") and response.text:
+            text = response.text
+        elif hasattr(response, "candidates") and response.candidates:
+            parts = response.candidates[0].content.parts
+            if parts and hasattr(parts[0], "text"):
+                text = parts[0].text
+
+        if not text or not text.strip():
+            print("⚠️ Empty LLM summary response")
+            return ""
+
         return _sanitize_llm_output(text)
+
     except Exception as e:
         print("❌ LLM error in generate_text_completion:", e)
-        return "LLM error occurred."
+        return ""

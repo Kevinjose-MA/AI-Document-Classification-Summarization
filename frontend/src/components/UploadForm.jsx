@@ -13,17 +13,34 @@ export default function UploadForm({ onUpload }) {
 
     try {
       setLoading(true);
-      await api.post("/documents/upload", formData);
 
+      const response = await api.post("/documents/upload", formData);
+
+      // Normal success
       setFile(null);
       if (onUpload) onUpload();
+
+      alert("Upload successful");
+
     } catch (err) {
       console.error(err);
+
+      if (err.response?.status === 409) {
+        const data = err.response.data.detail;
+
+        alert(
+          `This file was already uploaded: ${data.filename}`
+        );
+
+        return;
+      }
+
       alert("Upload failed");
     } finally {
       setLoading(false);
     }
   };
+
 
   return (
     <div className="bg-white border rounded-xl shadow-sm p-6 space-y-4 max-w-xl">

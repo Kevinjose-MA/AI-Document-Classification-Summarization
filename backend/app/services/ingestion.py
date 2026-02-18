@@ -5,6 +5,7 @@ from datetime import datetime
 from fastapi import UploadFile
 from app.models.models import DocumentModel
 from app.services.extractor import extract_clauses
+from fastapi import HTTPException
 import logging
 
 logger = logging.getLogger("INGEST")
@@ -90,14 +91,24 @@ def ingest_file(file_bytes: bytes, filename: str, user_id: str, purpose: str,
     file_hash = compute_file_hash(file_bytes)
 
     # ---- Dedup ----
-    existing = DocumentModel.objects(file_hash=file_hash, user_id=str(user_id)).first()
+    existing = DocumentModel.objects(
+    file_hash=file_hash,
+    user_id=str(user_id)
+    ).first()
+
     if existing:
-        logger.info(f"[INGEST] Duplicate detected | file={filename} | document_id={existing.id}")
-        return {
-            "status": "duplicate",
-            "document_id": str(existing.id),
-            "filename": existing.filename
-        }
+        logger.info(
+            f"[INGEST] Duplicate detected | file={filename} | document_id={existing.id}"
+        )
+
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "status": "duplicate",
+                "document_id": str(existing.id),
+                "filename": existing.filename
+            }
+        )
 
     # ---- External encryption detection ----
     encrypted_external = False

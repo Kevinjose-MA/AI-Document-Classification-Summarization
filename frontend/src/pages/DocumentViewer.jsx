@@ -26,6 +26,28 @@ export default function DocumentViewer() {
     fetchDocument();
   }, [id]);
 
+  const handleDelete = async () => {
+    const confirmDelete = window.confirm(
+      "Are you sure you want to delete this document?"
+    );
+
+    if (!confirmDelete) return;
+
+    try {
+      await api.delete(`/documents/${doc.id}`);
+
+      alert("Document deleted successfully");
+
+      // Go back to document list
+      navigate("/documents");
+
+    } catch (err) {
+      console.error(err);
+      alert("Failed to delete document");
+    }
+  };
+
+
   if (loading)
     return (
       <div className="text-center py-16 text-gray-500 animate-pulse">
@@ -75,18 +97,29 @@ export default function DocumentViewer() {
           ← Back
         </button>
 
-        {fileUrl && (
-          <a
-            href={fileUrl}
-            target="_blank"
-            rel="noreferrer"
-            className="bg-blue-600 text-white px-4 py-2 rounded-lg
-                       hover:bg-blue-700 active:scale-95
-                       transition duration-200"
+        <div className="flex gap-3">
+          {fileUrl && (
+            <a
+              href={fileUrl}
+              target="_blank"
+              rel="noreferrer"
+              className="bg-blue-600 text-white px-4 py-2 rounded-lg
+                        hover:bg-blue-700 active:scale-95
+                        transition duration-200"
+            >
+              Download
+            </a>
+          )}
+
+          <button
+            onClick={handleDelete}
+            className="bg-red-600 text-white px-4 py-2 rounded-lg
+                      hover:bg-red-700 active:scale-95
+                      transition duration-200"
           >
-            Download
-          </a>
-        )}
+            Delete
+          </button>
+        </div>
       </div>
 
       {/* ===== MAIN GRID ===== */}

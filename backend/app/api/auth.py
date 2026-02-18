@@ -7,6 +7,10 @@ from datetime import datetime, timedelta
 from app.models.models import UserModel
 from app.core.config import SECRET_KEY
 
+from fastapi import Depends, Header
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+
+
 router = APIRouter()
 
 # ----------------------
@@ -53,6 +57,22 @@ def create_token(user_id: str, role: str) -> str:
         "exp": datetime.utcnow() + timedelta(days=1),
     }
     return jwt.encode(payload, SECRET_KEY, algorithm="HS256")
+
+security = HTTPBearer()
+
+def get_current_user_id(
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+):
+    token = credentials.credentials
+
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=["HS256"])
+        return payload.get("user_id")
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token expired")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
 
 
 # ----------------------
