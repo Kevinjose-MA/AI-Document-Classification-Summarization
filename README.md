@@ -104,7 +104,7 @@ app/
 
 ```bash
 git clone https://github.com/Kevinjose-MA/AI-Document-Classification-Summarization.git
-cd your-repo-name
+cd https://github.com/Kevinjose-MA/AI-Document-Classification-Summarization.git
 ````
 
 ### 2️⃣ Create Virtual Environment
@@ -169,3 +169,4 @@ Building scalable AI SaaS systems.
 ## 📜 License
 
 MIT License
+
