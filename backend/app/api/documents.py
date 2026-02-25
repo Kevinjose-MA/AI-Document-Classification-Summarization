@@ -1,6 +1,7 @@
 # app/api/documents.py
 
 import os
+import asyncio
 import imaplib
 import email
 from email import policy
@@ -58,22 +59,28 @@ async def upload_document(
 # List documents with RBAC
 # -------------------------
 @router.get("/documents")
-def list_documents(user=Depends(get_current_user)):
-    all_docs = DocumentModel.objects()
-    if user["role"].lower() != "admin":
-        all_docs = all_docs.filter(user_id=str(user["user_id"]))
+async def list_documents(user=Depends(get_current_user)):
+    def _query():
+        all_docs = DocumentModel.objects()
+        if user["role"].lower() != "admin":
+            all_docs = all_docs.filter(user_id=str(user["user_id"]))
+        return list(all_docs)
+
+    docs = await asyncio.to_thread(_query)
+
     return [
         {
-            "id": str(d.id),
-            "filename": d.filename,
-            "purpose": d.purpose,
-            "received_at": d.received_at,
-            "status": d.status,
-            "summary": d.summary,
-            "department": d.department,
-            "sensitivity": d.sensitivity,
-            "routing_status": d.routing_status
-        } for d in all_docs
+            "id":             str(d.id),
+            "filename":       d.filename,
+            "purpose":        d.purpose,
+            "received_at":    d.received_at,
+            "status":         d.status,
+            "summary":        d.summary,
+            "department":     d.department,
+            "sensitivity":    d.sensitivity,
+            "routing_status": d.routing_status,
+        }
+        for d in docs
     ]
 
 
@@ -81,23 +88,25 @@ def list_documents(user=Depends(get_current_user)):
 # Get single document by ID with RBAC
 # -------------------------
 @router.get("/documents/{doc_id}")
-def get_document(doc_id: str, user=Depends(get_current_user)):
-    doc = DocumentModel.objects(id=doc_id).first()
+async def get_document(doc_id: str, user=Depends(get_current_user)):
+    doc = await asyncio.to_thread(lambda: DocumentModel.objects(id=doc_id).first())
+
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
     if user["role"].lower() != "admin" and str(doc.user_id) != str(user["user_id"]):
         raise HTTPException(status_code=403, detail="Access denied")
+
     return {
-        "id": str(doc.id),
-        "filename": doc.filename,
-        "purpose": doc.purpose,
-        "received_at": doc.received_at,
-        "status": doc.status,
-        "summary": doc.summary,
-        "department": doc.department,
-        "sensitivity": doc.sensitivity,
+        "id":             str(doc.id),
+        "filename":       doc.filename,
+        "purpose":        doc.purpose,
+        "received_at":    doc.received_at,
+        "status":         doc.status,
+        "summary":        doc.summary,
+        "department":     doc.department,
+        "sensitivity":    doc.sensitivity,
         "routing_status": doc.routing_status,
-        "clauses": doc.clauses
+        "clauses":        doc.clauses,
     }
 
 
@@ -191,35 +200,42 @@ async def ingest_email_file(
     user=Depends(get_current_user)
 ):
     file_bytes = await file.read()
-    return ingest_bytes(
+    return await asyncio.to_thread(
+        ingest_bytes,
         file_bytes=file_bytes,
         filename=file.filename,
         user_id=str(user["user_id"]),
         purpose=purpose,
         content_type=file.content_type,
-        source="email"
+        source="email",
     )
 
 
 # -------------------------
-# Download / View file
+# Download / View file      🔒 Auth added — was completely unprotected
 # -------------------------
 @router.get("/documents/{document_id}/file")
-def get_document_file(document_id: str):
+async def get_document_file(document_id: str, user=Depends(get_current_user)):
     if not ObjectId.is_valid(document_id):
         raise HTTPException(status_code=400, detail="Invalid document ID")
 
-    doc = DocumentModel.objects(id=document_id).first()
+    doc = await asyncio.to_thread(
+        lambda: DocumentModel.objects(id=document_id).first()
+    )
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
 
+    # Enforce ownership — non-admins can only download their own files
+    if user["role"].lower() != "admin" and str(doc.user_id) != str(user["user_id"]):
+        raise HTTPException(status_code=403, detail="Access denied")
+
     file_path = os.path.abspath(doc.storage_path)
     if not os.path.exists(file_path):
-        raise HTTPException(status_code=404, detail="File not found")
+        raise HTTPException(status_code=404, detail="File not found on disk")
 
     return FileResponse(
         path=file_path,
-        media_type="application/pdf",
+        media_type=doc.content_type or "application/octet-stream",
         filename=doc.filename,
         headers={
             "Content-Disposition": f'inline; filename="{doc.filename}"',
@@ -227,21 +243,18 @@ def get_document_file(document_id: str):
         },
     )
 
+
 # -------------------------
 # Delete File
 # -------------------------
-
 @router.delete("/documents/{document_id}")
-def delete_document(document_id: str, user_id: str = Depends(get_current_user_id)):
-
-    document = DocumentModel.objects(
-        id=document_id,
-        user_id=str(user_id)
-    ).first()
+async def delete_document(document_id: str, user_id: str = Depends(get_current_user_id)):
+    document = await asyncio.to_thread(
+        lambda: DocumentModel.objects(id=document_id, user_id=str(user_id)).first()
+    )
 
     if not document:
         raise HTTPException(status_code=404, detail="Document not found")
 
-    document.delete()
-
+    await asyncio.to_thread(document.delete)
     return {"message": "Document deleted successfully"}

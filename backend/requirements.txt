@@ -14,3 +14,5 @@ torch==2.7.1+cpu
 python-dotenv
 passlib[bcrypt]
 pyjwt
+pydantic
+motor

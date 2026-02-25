@@ -152,23 +152,38 @@ async def call_llm_batch(prompts: List[str]) -> Dict[str, Dict[str, str]]:
     return results
 
 
-def generate_text_completion(prompt: str, max_tokens: int = 500) -> str:
+def generate_text_completion(
+    prompt: str,
+    max_tokens: int = 500,
+    image_b64: str | None = None,
+    image_mime: str = "image/png",
+) -> str:
     """
-    Wrapper for a simple text completion (for summarizer)
+    Wrapper for text or vision completion used by the summarizer.
+    Added image_b64 / image_mime for vision calls — existing callers
+    passing only (prompt) or (prompt, max_tokens) are unaffected.
     """
     try:
+        if image_b64:
+            import base64
+            from PIL import Image
+            from io import BytesIO
+            img_bytes = base64.b64decode(image_b64)
+            pil_image = Image.open(BytesIO(img_bytes))
+            contents = [pil_image, prompt]
+        else:
+            contents = [{"role": "user", "parts": [prompt]}]
+
         response = genai_model.generate_content(
-            contents=[{"role": "user", "parts": [prompt]}],
+            contents=contents,
             generation_config={
-                "temperature": 0.2,
+                "temperature": 0.1,
                 "top_p": 0.7,
                 "max_output_tokens": max_tokens
             }
         )
 
-        # 🔍 SAFELY extract content
         text = None
-
         if hasattr(response, "text") and response.text:
             text = response.text
         elif hasattr(response, "candidates") and response.candidates:
@@ -183,5 +198,5 @@ def generate_text_completion(prompt: str, max_tokens: int = 500) -> str:
         return _sanitize_llm_output(text)
 
     except Exception as e:
-        print("❌ LLM error in generate_text_completion:", e)
+        print(f"❌ LLM error in generate_text_completion: {e}")
         return ""
