@@ -50,11 +50,10 @@ def save_file(file_bytes: bytes, filename: str, department: str) -> str:
 
 
 # -------------------------
-# Manual Upload             (signature unchanged)
+# Manual Upload
 # -------------------------
 async def ingest_upload(file: UploadFile, user_id: str, purpose: str = "Manual Upload"):
     file_bytes = await file.read()
-    # Run the blocking ingestion pipeline in a thread — never blocks the event loop
     return await asyncio.to_thread(
         ingest_file,
         file_bytes=file_bytes,
@@ -63,14 +62,16 @@ async def ingest_upload(file: UploadFile, user_id: str, purpose: str = "Manual U
         purpose=purpose,
         content_type=file.content_type,
         source="manual",
+        email_context=None,
     )
 
 
 # -------------------------
-# Bytes ingestion           (signature unchanged)
+# Bytes ingestion  (called by email pipeline)
 # -------------------------
 def ingest_bytes(file_bytes: bytes, filename: str, user_id: str, purpose: str,
-                 content_type: str = None, source: str = "email"):
+                 content_type: str = None, source: str = "email",
+                 email_context: dict = None):
     return ingest_file(
         file_bytes=file_bytes,
         filename=filename,
@@ -78,16 +79,22 @@ def ingest_bytes(file_bytes: bytes, filename: str, user_id: str, purpose: str,
         purpose=purpose,
         content_type=content_type,
         source=source,
+        email_context=email_context,
     )
 
 
 # -------------------------
-# Core ingestion logic      (signature unchanged)
+# Core ingestion logic
 # -------------------------
 def ingest_file(file_bytes: bytes, filename: str, user_id: str, purpose: str,
-                content_type: str = None, source: str = "manual"):
+                content_type: str = None, source: str = "manual",
+                email_context: dict = None):
 
     logger.info(f"[INGEST] Ingestion started | file={filename} | source={source} | user={user_id}")
+
+    if email_context:
+        logger.info(f"[INGEST] Email context | subject={email_context.get('subject')} | from={email_context.get('from')}")
+
     file_hash = compute_file_hash(file_bytes)
 
     # ── Deduplication ─────────────────────────────────────────────────────────
@@ -120,9 +127,13 @@ def ingest_file(file_bytes: bytes, filename: str, user_id: str, purpose: str,
         }
         clauses = []
     else:
-        # Pass bytes + filename directly — no temp file written to disk
         logger.info(f"[INGEST] Clause extraction started | file={filename}")
-        enriched = extract_clauses_from_bytes(file_bytes, filename, enrich=True)
+        enriched = extract_clauses_from_bytes(
+            file_bytes,
+            filename,
+            enrich=True,
+            email_context=email_context,   # ← passed to extractor
+        )
         metadata = enriched.get("metadata", {})
         clauses = enriched.get("clauses", [])
         logger.info(f"[INGEST] Clause extraction completed | clauses={len(clauses)}")

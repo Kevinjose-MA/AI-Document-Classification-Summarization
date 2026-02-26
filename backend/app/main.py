@@ -20,26 +20,18 @@ import time
 import logging
 import mimetypes
 
-
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import requests
 from fastapi import HTTPException
 from fastapi.responses import FileResponse
-import os
 from bs4 import BeautifulSoup
-from urllib.parse import urlparse  
+from urllib.parse import urlparse
 
 from app.api.documents import router as documents_router
 from app.core.config import init_db
 from app.api.auth import router as auth_router
 from app.models.models import DocumentModel
-from app.api.documents import fetch_email_attachments
-
-
-
-
-
 
 # Initialize MongoDB
 init_db()
@@ -61,9 +53,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# -------------------------
-# Include routers
-# -------------------------
 app.include_router(auth_router, prefix="/api/v1", tags=["Auth"])
 app.include_router(documents_router, prefix="/api/v1", tags=["Documents"])
 
@@ -72,7 +61,6 @@ model = SentenceTransformer("sentence-transformers/all-MiniLM-L12-v2")
 tokenizer = AutoTokenizer.from_pretrained("sentence-transformers/all-MiniLM-L12-v2")
 genai_model = genai.GenerativeModel("models/gemini-2.5-flash")
 
-# Cache
 QA_CACHE_FILE = "qa_cache.json"
 qa_cache = {}
 if os.path.exists(QA_CACHE_FILE):
@@ -92,14 +80,10 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s"
 )
-
 logger = logging.getLogger(__name__)
 
-# --- HackRx Output Formatter ---
+
 def format_hackrx_answer(answer_type: str, value: str) -> str:
-    """
-    Format answers exactly as HackRx expects.
-    """
     formats = {
         "flight_number": f"The flight number is {value}",
         "secret_token": f"Your secret token is {value}"
@@ -126,51 +110,15 @@ def get_flight_number_from_document():
             "Mumbai": "India Gate",
             "Chennai": "Charminar",
             "Hyderabad": "Marina Beach",
-            "Ahmedabad": "Howrah Bridge",
-            "Mysuru": "Golconda Fort",
-            "Kochi": "Qutub Minar",
-            "Pune": "Meenakshi Temple",
-            "Nagpur": "Lotus Temple",
-            "Chandigarh": "Mysore Palace",
-            "Kerala": "Rock Garden",
-            "Bhopal": "Victoria Memorial",
-            "Varanasi": "Vidhana Soudha",
-            "Jaisalmer": "Sun Temple",
             "Paris": "Taj Mahal",
-            "Pune": "Golden Temple",
             "New York": "Eiffel Tower",
-            "London": "Statue of Liberty",
-            "Tokyo": "Big Ben",
-            "Beijing": "Colosseum",
-            "Bangkok": "Christ the Redeemer",
-            "Toronto": "Burj Khalifa",
-            "Dubai": "CN Tower",
-            "Amsterdam": "Petronas Towers",
-            "Cairo": "Leaning Tower of Pisa",
-            "San Francisco": "Mount Fuji",
-            "Berlin": "Niagara Falls",
-            "Barcelona": "Louvre Museum",
-            "Moscow": "Stonehenge",
-            "Seoul": "Sagrada Familia",
-            "Cape Town": "Acropolis",
-            "Istanbul": "Big Ben",
-            "Riyadh": "Machu Picchu",
-            "Dubai Airport": "Moai Statues",
-            "Singapore": "Christchurch Cathedral",
-            "Jakarta": "The Shard",
-            "Vienna": "Blue Mosque",
-            "Kathmandu": "Neuschwanstein Castle",
-            "Los Angeles": "Buckingham Palace",
-            "Mumbai": "Space Needle",
-            "Seoul": "Times Square"
+            "London": "Big Ben",
         }
 
         landmark = city_to_landmark.get(city_name)
         if not landmark:
             print("❌ No landmark mapping found for city.")
             return None
-
-        print(f"📍 Landmark: {landmark}")
 
         base_url = "https://register.hackrx.in/teams/public/flights/"
         if landmark == "Gateway of India":
@@ -190,30 +138,25 @@ def get_flight_number_from_document():
         flight_number = (flight_data.get("flightNumber")
                          or flight_data.get("data", {}).get("flightNumber"))
         if not flight_number:
-            print("❌ No flight number in response.")
             return None
 
-        print(f"✈ Flight number: {flight_number}")
         return str(flight_number)
-
     except Exception as e:
         print(f"❌ Error fetching flight number: {e}")
         return None
 
 
-
-# Helper: detect if a URL points to a document (handles query params)
 def is_document_url(url: str) -> bool:
     path = urlparse(url).path.lower()
     return path.endswith((".pdf", ".docx", ".doc", ".txt"))
 
-# Helper: detect language of a question.
+
 def detect_input_language(text: str) -> str:
     if re.search(r'[\u0D00-\u0D7F]', text):
         return "mal"
     return "eng"
 
-# Handle dynamic get requests discovered in answers (e.g., hackrx.in)
+
 def handle_dynamic_get_requests(answer_text: str) -> str:
     whitelist = ["hackrx.in"]
     urls = re.findall(r"https?://\S+", str(answer_text))
@@ -267,18 +210,22 @@ def handle_dynamic_get_requests(answer_text: str) -> str:
                 continue
     return str(answer_text)
 
+
 def url_hash(url: str) -> str:
     return hashlib.md5(url.encode()).hexdigest()
+
 
 def score_clause_hybrid(clause, embedding_score, keywords, tags):
     keyword_score = sum(1 for k in clause.lower().split() if k in keywords)
     tag_score = sum(1 for t in clause.lower().split() if t in tags)
     return embedding_score + 0.2 * keyword_score + 0.5 * tag_score
 
+
 def save_clause_cache(url: str, clauses: List[Dict[str, str]]):
     os.makedirs("clause_cache", exist_ok=True)
     with open(f"clause_cache/{url_hash(url)}.json", "w", encoding="utf-8") as f:
         json.dump(clauses, f, indent=2, ensure_ascii=False)
+
 
 def extract_keywords(question: str) -> List[str]:
     tokens = re.findall(r'\b\w+\b', question.lower())
@@ -288,6 +235,7 @@ def extract_keywords(question: str) -> List[str]:
     }
     return [t for t in tokens if t not in stopwords and len(t) > 2]
 
+
 def extract_tags(text):
     words = re.findall(r'\w+', text.lower())
     stopwords = {
@@ -295,6 +243,7 @@ def extract_tags(text):
         "are", "you", "not", "but", "all", "any", "your", "has", "have"
     }
     return list(set(w for w in words if len(w) > 3 and w not in stopwords))
+
 
 def extract_section_from_clause(clause_text):
     for line in clause_text.split('\n'):
@@ -305,12 +254,14 @@ def extract_section_from_clause(clause_text):
             return line
     return "Unknown"
 
+
 def build_faiss_index(clauses: List[Dict]) -> tuple:
     texts = [c["clause"] for c in clauses]
     vectors = model.encode(texts)
     index = faiss.IndexFlatL2(vectors.shape[1])
     index.add(np.array(vectors).astype(np.float32))
     return index, texts
+
 
 def trim_clauses(clauses: List[Dict[str, str]], max_tokens: int = 2000) -> List[Dict[str, str]]:
     result = []
@@ -324,8 +275,9 @@ def trim_clauses(clauses: List[Dict[str, str]], max_tokens: int = 2000) -> List[
         total += tokens
     return result
 
-# dynamic_keyword_map filled per run
+
 dynamic_keyword_map = {}
+
 
 def split_compound_question(question: str) -> List[str]:
     if any(word in question.lower() for word in ["rs", "claim", "settle", "reimburse", "amount", "treatment"]):
@@ -335,6 +287,7 @@ def split_compound_question(question: str) -> List[str]:
         for part in re.split(r"\b(?:and|also|then|while|meanwhile|simultaneously|additionally|,)\b", question)
         if len(part.strip()) > 10
     ]
+
 
 def get_top_clauses(question: str, index, clause_texts: List[str]) -> List[str]:
     question_embedding = model.encode([question])
@@ -351,12 +304,11 @@ def get_top_clauses(question: str, index, clause_texts: List[str]) -> List[str]:
 
     parsed = parse_query_with_dynamic_map(question, dynamic_keyword_map)
     tags = parsed.get("tags", [])
-    print(f"🧩 Tags for question: {tags}")
-
     tag_matched = [c for c in clause_texts if any(tag in c.lower() for tag in tags)]
 
     combined = list(dict.fromkeys(tag_matched + top_faiss_clauses + keyword_clauses))
     return combined[:12]
+
 
 async def retrieve_clauses_parallel(questions, index, clause_texts):
     loop = asyncio.get_event_loop()
@@ -401,7 +353,6 @@ async def retrieve_clauses_parallel(questions, index, clause_texts):
             sorted_clauses += [c for c in fallback_matches if c not in sorted_clauses]
 
         if len(sorted_clauses) < 5:
-            print(f"⚠ No strong match for: {q}")
             fallback = [
                 c["clause"] for c in clause_texts
                 if any(k in c["clause"].lower() for k in keywords)
@@ -411,28 +362,8 @@ async def retrieve_clauses_parallel(questions, index, clause_texts):
         if not sorted_clauses:
             sorted_clauses = [c["clause"] for c in clause_texts[:5]]
 
-        if faiss_matches:
-            print(f"[{q[:40]}...] Top FAISS score: {faiss_matches[0][1]:.3f}")
-
-        if any(k in q.lower() for k in [
-            "documents", "upload", "submit", "claim form", "hospitalization",
-            "settle", "reimburse", "reimbursement", "amount", "paid", "payment"
-        ]):
-            general_doc_clauses = [
-                c["clause"] for c in clause_texts
-                if "required document" in c["clause"].lower()
-                or "claim submission" in c["clause"].lower()
-                or "original bills" in c["clause"].lower()
-                or "submit the claim" in c["clause"].lower()
-                or "documents required" in c["clause"].lower()
-            ]
-            for clause in general_doc_clauses:
-                if clause not in sorted_clauses:
-                    sorted_clauses.append(clause)
-
         top_trimmed = sorted_clauses[:15]
         per_question_token_limit = min(2500, max(30000 // max(len(questions), 1), 800))
-        print(f"📊 [{q[:40]}...] → using {per_question_token_limit} tokens")
 
         trimmed = trim_clauses(
             [{"clause": c} for c in top_trimmed],
@@ -460,11 +391,11 @@ async def retrieve_clauses_parallel(questions, index, clause_texts):
 
     return question_clause_map
 
+
 def build_prompt_batch(question_clause_map: Dict[str, List[Dict[str, str]]]) -> str:
     prompt_entries = []
 
     for i, (question, clauses) in enumerate(question_clause_map.items(), start=1):
-        # Determine language for this question (so LLM answers in same language)
         lang = detect_input_language(question)
         lang_hint = "Malayalam" if lang == "mal" else "English"
 
@@ -473,12 +404,9 @@ def build_prompt_batch(question_clause_map: Dict[str, List[Dict[str, str]]]) -> 
             section = c.get("section", "Unknown").strip().replace('"', "'")
             tags = ", ".join(c.get("tags", []))
             text = c.get("clause", "").strip().replace('"', "'")
-            clause_blocks.append(
-                f"Section: {section}\nTags: {tags}\nClause: {text}"
-            )
+            clause_blocks.append(f"Section: {section}\nTags: {tags}\nClause: {text}")
 
         joined_clauses = "\n\n".join(clause_blocks)
-        # Include language hint per question
         prompt_entries.append(
             f'"Q{i}": {{"question": "{question}", "language": "{lang_hint}", "clauses": "{joined_clauses}"}}'
         )
@@ -502,18 +430,16 @@ Instructions:
 - If multiple clauses help, summarize them.
 - Use the Section to understand context.
 - Tags are just helpful hints.
-- Be concise. Max 25 words. Use partial clauses if helpful.
-- Even if the clause partially answers the question, give a relevant answer — don’t default to "No matching clause found."
-- Language: Respect the input language for each question. If the question is Malayalam, answer in Malayalam. If English, answer in English.
+- Be concise. Max 25 words.
+- Language: Respect the input language for each question.
 
 Question-Clause Mapping:
 {{
 {entries}
 }}
 """.strip()
-    total_tokens = len(tokenizer.tokenize(full_prompt))
-    print(f"🔢 Total Gemini prompt tokens used: {total_tokens}")
     return full_prompt
+
 
 async def call_llm(prompt: str, offset: int, batch_size: int) -> Dict[str, Dict[str, str]]:
     try:
@@ -522,31 +448,18 @@ async def call_llm(prompt: str, offset: int, batch_size: int) -> Dict[str, Dict[
             contents=[{"role": "user", "parts": [prompt]}],
             generation_config={"response_mime_type": "application/json"},
         )
-        # try robust extraction of text content
         content = None
         try:
             content = getattr(response, "text", None) or response.candidates[0].content.parts[0].text
         except Exception:
-            # fallback: stringify response
             content = str(response)
 
         content = (content or "").strip()
-        # guard: some LLMs prefix with "json" or backticks — try to find JSON substring
-        json_text = None
         try:
-            # try direct parse
-            json_text = content
-            parsed = json.loads(json_text)
+            parsed = json.loads(content)
         except Exception:
-            # try to extract first JSON-like block
             m = re.search(r'(\{[\s\S]*\})', content)
-            if m:
-                try:
-                    parsed = json.loads(m.group(1))
-                except Exception:
-                    parsed = {}
-            else:
-                parsed = {}
+            parsed = json.loads(m.group(1)) if m else {}
 
         validated = {}
         for i in range(batch_size):
@@ -558,7 +471,6 @@ async def call_llm(prompt: str, offset: int, batch_size: int) -> Dict[str, Dict[
             elif answer:
                 validated[full_key] = {"answer": answer}
             else:
-                # if LLM didn't return structured answer, fallback to no match
                 validated[full_key] = {"answer": "No matching clause found."}
         return validated
 
@@ -569,11 +481,8 @@ async def call_llm(prompt: str, offset: int, batch_size: int) -> Dict[str, Dict[
             for i in range(batch_size)
         }
 
+
 def extract_best_sentence(question: str, clauses: List[Dict[str, str]]) -> str:
-    """
-    Given a question and a list of clause dicts (with "clause" keys),
-    return the single most relevant sentence from them.
-    """
     keywords = extract_keywords(question)
     best_sentence = None
     best_score = 0
@@ -592,9 +501,11 @@ def extract_best_sentence(question: str, clauses: List[Dict[str, str]]) -> str:
 
     return best_sentence if best_sentence else None
 
+
 @app.get("/health")
 def health_check():
     return {"status": "ok"}
+
 
 @app.post("/api/v1/hackrx/run")
 async def hackrx_run(req: HackRxRequest):
@@ -606,7 +517,6 @@ async def hackrx_run(req: HackRxRequest):
     flight_number_result = None
     secret_token_result = None
 
-    # First pass: Load/extract clauses
     for url in doc_urls:
         try:
             if is_document_url(url):
@@ -614,25 +524,21 @@ async def hackrx_run(req: HackRxRequest):
                 if Path(cache_path).exists():
                     with open(cache_path, "r", encoding="utf-8") as f:
                         clauses = json.load(f)
-                    print(f"🔁 Loaded cached clauses for {url}")
                 else:
                     clauses = extract_clauses_from_url(url)
                     if clauses:
                         save_clause_cache(url, clauses)
-                        print(f"📄 Extracted and cached clauses for {url}")
                     else:
                         continue
                 all_clauses.extend(clauses)
         except Exception as e:
             print(f"❌ Failed to process {url}: {e}")
 
-    # Step 1: Check for myFavouriteCity mapping
     if any("myFavouriteCity" in clause.get("clause", "") for clause in all_clauses):
         flight_number = get_flight_number_from_document()
         if flight_number:
             return {"answers": [format_hackrx_answer("flight_number", flight_number)]}
 
-    # Step 2: Scan clauses for API endpoints
     for clause_obj in all_clauses:
         urls = re.findall(r"https?://\S+", clause_obj.get("clause", ""))
         for u in urls:
@@ -644,7 +550,6 @@ async def hackrx_run(req: HackRxRequest):
                             data = resp.json()
                         except ValueError:
                             data = None
-
                         if isinstance(data, dict):
                             if "data" in data and isinstance(data["data"], dict):
                                 if "flightNumber" in data["data"]:
@@ -658,13 +563,11 @@ async def hackrx_run(req: HackRxRequest):
                 except Exception as e:
                     print(f"❌ Failed API fetch for clause URL {u}: {e}")
 
-    # Step 3: Immediate return if found
     if flight_number_result:
         return {"answers": [format_hackrx_answer("flight_number", flight_number_result)]}
     if secret_token_result:
         return {"answers": [format_hackrx_answer("secret_token", secret_token_result)]}
 
-    # Step 4: Whitelisted non-document URLs
     whitelist = ["hackrx.in", "example.com"]
     for url in doc_urls:
         if any(domain in url for domain in whitelist) and not is_document_url(url):
@@ -698,22 +601,14 @@ async def hackrx_run(req: HackRxRequest):
                 print(f"❌ Error fetching {url}: {e}")
             return {"answers": ["Failed to fetch content from non-document URL."]}
 
-    # Step 5: Fallback to FAISS/LLM
-    #return {"answers": ["No matching clause found."]}
-
     for url in doc_urls:
         try:
             if not is_document_url(url):
-                print(f"🌐 Non-document URL detected, fetching content directly: {url}")
                 try:
                     resp = requests.get(url, timeout=5)
                     if resp.status_code == 200:
-                        clauses = [{"clause": resp.text.strip()}]
-                        all_clauses.extend(clauses)
-                        continue
-                    else:
-                        print(f"⚠ Failed to fetch {url}: {resp.status_code}")
-                        continue
+                        all_clauses.extend([{"clause": resp.text.strip()}])
+                    continue
                 except Exception as e:
                     print(f"❌ Error fetching non-document URL: {e}")
                     continue
@@ -722,14 +617,11 @@ async def hackrx_run(req: HackRxRequest):
             if Path(cache_path).exists():
                 with open(cache_path, "r", encoding="utf-8") as f:
                     clauses = json.load(f)
-                print(f"🔁 Loaded cached clauses for {url}")
             else:
                 clauses = extract_clauses_from_url(url)
                 if clauses:
                     save_clause_cache(url, clauses)
-                    print(f"📄 Extracted and cached clauses for {url}")
                 else:
-                    print(f"⚠ Skipping invalid document: {url}")
                     continue
             all_clauses.extend(clauses)
         except Exception as e:
@@ -738,7 +630,6 @@ async def hackrx_run(req: HackRxRequest):
     if not all_clauses:
         return {"answers": ["No valid clauses found in provided documents."] * len(req.questions)}
 
-    # Check again for direct API URLs inside clauses (final attempt)
     whitelist = ["hackrx.in"]
     for clause_obj in all_clauses:
         clause_text = clause_obj.get("clause", "")
@@ -746,7 +637,6 @@ async def hackrx_run(req: HackRxRequest):
         for u in urls_in_clause:
             if any(domain in u for domain in whitelist):
                 try:
-                    print(f"🌐 Direct API call detected from clause: {u}")
                     resp = requests.get(u, timeout=10)
                     if resp.status_code == 200:
                         try:
@@ -764,26 +654,18 @@ async def hackrx_run(req: HackRxRequest):
                 except Exception as e:
                     print(f"❌ Error fetching direct API from clause: {e}")
 
-    # Build dynamic keyword map from clauses
     dynamic_keyword_map = extract_dynamic_keywords_from_clauses(all_clauses)
-    print(f"🧠 Dynamic keyword map tags: {list(dynamic_keyword_map.keys())[:10]}")
 
-    # Build or reuse FAISS index for the first document's hash
     url0_hash = url_hash(doc_urls[0])
     if url0_hash in app.state.cache_indices:
-        print(f"⚡ Using preloaded FAISS index for {url0_hash}")
         index = app.state.cache_indices[url0_hash]["index"]
         clause_texts = app.state.cache_indices[url0_hash]["clauses"]
     else:
         valid_clauses = [c for c in all_clauses if c.get("clause", "").strip()]
         clause_texts = valid_clauses
         index, _ = build_faiss_index(valid_clauses)
-        app.state.cache_indices[url0_hash] = {
-            "index": index,
-            "clauses": valid_clauses
-        }
+        app.state.cache_indices[url0_hash] = {"index": index, "clauses": valid_clauses}
 
-    # Split compound questions and map to originals
     split_questions = []
     original_map = {}
     for q in req.questions:
@@ -792,16 +674,13 @@ async def hackrx_run(req: HackRxRequest):
             original_map[part] = q
             split_questions.append(part)
 
-    # Prepare list of uncached questions
     uncached_questions = [q for q in split_questions if q not in qa_cache]
     question_clause_map = await retrieve_clauses_parallel(uncached_questions, index, clause_texts)
 
-    # For uncached questions, try to extract best sentence candidate to seed QA cache
     for q in uncached_questions:
         best_sentence = extract_best_sentence(q, question_clause_map.get(q, []))
         qa_cache[q] = best_sentence if best_sentence else "No matching clause found"
 
-    # Call LLM in batches
     batch_size = 15
     batches = [list(question_clause_map.items())[i:i + batch_size] for i in range(0, len(uncached_questions), batch_size)]
     prompts = [build_prompt_batch(dict(batch)) for batch in batches]
@@ -816,127 +695,140 @@ async def hackrx_run(req: HackRxRequest):
         answer = merged.get(f"Q{i+1}", {}).get("answer", "No answer found.")
         qa_cache[question] = answer
 
-    # persist qa_cache
     with open(QA_CACHE_FILE, "w", encoding="utf-8") as f:
         json.dump(qa_cache, f, indent=2, ensure_ascii=False)
 
-    # map split answers back to original questions and preserve language
     answers_map = {}
     for sq, orig_q in original_map.items():
         answers_map.setdefault(orig_q, []).append(qa_cache.get(sq, "No answer found."))
 
     final_answers = [" ".join(answers_map.get(q, ["No answer found."])) for q in req.questions]
 
-    # Post-process: handle any dynamic GETs referenced in answers
     processed_final_answers = []
     for ans in final_answers:
         handled = handle_dynamic_get_requests(ans)
-        # ensure string
         if isinstance(handled, dict):
             handled = json.dumps(handled, ensure_ascii=False)
         processed_final_answers.append(str(handled))
 
-    print("\n📤 Final Answers:")
-    for ans in processed_final_answers:
-        print(f"🟢  A: {ans}\n")
-
     print(f"✅ Total /run latency: {time.time() - start_time:.2f} seconds")
     return {"answers": processed_final_answers}
 
+
+# -------------------------
+# Startup — FAISS warmup only
+# Email ingestion is NOT run at startup.
+# Each user triggers their own sync via POST /api/v1/documents/ingest-email
+# -------------------------
 @app.on_event("startup")
 async def warmup_model():
     logger.info("[INGEST] Application startup triggered")
-    logger.info("[INGEST] Email ingestion & intelligence warmup started")
+    logger.info("[INGEST] Intelligence warmup started")
 
     app.state.cache_indices = {}
 
     clause_dir = "clause_cache"
-    if not os.path.exists(clause_dir):
-        os.makedirs(clause_dir, exist_ok=True)
+    os.makedirs(clause_dir, exist_ok=True)
 
     for filename in os.listdir(clause_dir):
-        if filename.endswith(".json"):
-            path = os.path.join(clause_dir, filename)
-            try:
-                with open(path, "r", encoding="utf-8") as f:
-                    raw_clauses = json.load(f)
-            except Exception:
-                logger.error(f"[INGEST] Failed to load clause cache: {filename}")
+        if not filename.endswith(".json"):
+            continue
+        path = os.path.join(clause_dir, filename)
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                raw_clauses = json.load(f)
+        except Exception:
+            logger.error(f"[INGEST] Failed to load clause cache: {filename}")
+            continue
+
+        valid_clauses = []
+        clause_texts = []
+
+        for item in raw_clauses:
+            if isinstance(item, dict):
+                clause_text = item.get("clause", "").strip()
+                section = item.get("section") or extract_section_from_clause(clause_text)
+                tags = item.get("tags") or extract_tags(clause_text)
+            elif isinstance(item, str):
+                clause_text = item.strip()
+                section = extract_section_from_clause(clause_text)
+                tags = extract_tags(clause_text)
+            else:
                 continue
 
-            valid_clauses = []
-            clause_texts = []
+            if clause_text:
+                tokens = len(tokenizer.tokenize(clause_text))
+                if tokens <= 512:
+                    enriched = {"clause": clause_text, "section": section, "tags": tags}
+                    valid_clauses.append(enriched)
+                    clause_texts.append(enriched)
 
-            for item in raw_clauses:
-                if isinstance(item, dict):
-                    clause_text = item.get("clause", "").strip()
-                    section = item.get("section") or extract_section_from_clause(clause_text)
-                    tags = item.get("tags") or extract_tags(clause_text)
-                elif isinstance(item, str):
-                    clause_text = item.strip()
-                    section = extract_section_from_clause(clause_text)
-                    tags = extract_tags(clause_text)
+        if not clause_texts:
+            logger.warning(f"[INGEST] No valid clauses found in {filename}")
+            continue
+
+        embeddings = model.encode([c["clause"] for c in clause_texts], show_progress_bar=False)
+        index = faiss.IndexFlatL2(embeddings.shape[1])
+        index.add(np.array(embeddings).astype(np.float32))
+
+        urlhash = filename.replace(".json", "")
+        app.state.cache_indices[urlhash] = {"index": index, "clauses": clause_texts}
+
+        logger.info(f"[INGEST] FAISS index loaded | source=cache | file={filename} | clauses={len(clause_texts)}")
+
+    # ── Auto-connect admin inbox from .env if not already saved ─────────────
+    from app.models.models import EmailCredentialModel, UserModel
+    from app.core.config import EMAIL_USER, EMAIL_PASS
+
+    if EMAIL_USER and EMAIL_PASS:
+        try:
+            admin = UserModel.objects(role="admin").first()
+            if admin:
+                cred = EmailCredentialModel.objects(user_id=str(admin.id)).first()
+                if not cred:
+                    cred = EmailCredentialModel(
+                        user_id=str(admin.id),
+                        imap_host="imap.gmail.com",
+                        imap_port=993,
+                        email_address=EMAIL_USER,
+                        email_password=EMAIL_PASS,
+                    )
+                    cred.save()
+                    logger.info(f"[INGEST] Admin inbox auto-connected from .env | {EMAIL_USER}")
                 else:
-                    continue
+                    logger.info(f"[INGEST] Admin inbox already connected | {cred.email_address}")
+            else:
+                logger.warning("[INGEST] No admin user found — skipping auto email connect")
+        except Exception as e:
+            logger.error(f"[INGEST] Auto email connect failed: {e}")
 
-                if clause_text:
-                    tokens = len(tokenizer.tokenize(clause_text))
-                    if tokens <= 512:
-                        enriched = {
-                            "clause": clause_text,
-                            "section": section,
-                            "tags": tags
-                        }
-                        valid_clauses.append(enriched)
-                        clause_texts.append(enriched)
+    logger.info("[INGEST] Startup warmup completed")
 
-            if not clause_texts:
-                logger.warning(f"[INGEST] No valid clauses found in {filename}")
-                continue
+    # Auto-trigger ingestion on startup for admin
+    from app.api.documents import fetch_email_attachments_for_user
+    import threading
 
-            embeddings = model.encode(
-                [c["clause"] for c in clause_texts],
-                show_progress_bar=False
-            )
+    if admin and cred:
+        thread = threading.Thread(
+            target=fetch_email_attachments_for_user,
+            args=(str(admin.id), cred),
+            daemon=True
+        )
+        thread.start()
+        logger.info(f"[INGEST] Startup email ingestion triggered for {cred.email_address}")
 
-            index = faiss.IndexFlatL2(embeddings.shape[1])
-            index.add(np.array(embeddings).astype(np.float32))
-
-            urlhash = filename.replace(".json", "")
-            app.state.cache_indices[urlhash] = {
-                "index": index,
-                "clauses": clause_texts
-            }
-
-            logger.info(
-                f"[INGEST] FAISS index loaded | source=cache | file={filename} | clauses={len(clause_texts)}"
-            )
-    fetch_email_attachments(user_id="system")
-
-    logger.info("[INGEST] Startup ingestion & warmup completed")
 
 @app.get("/api/v1/documents/{file_id}/preview")
 def preview_document(file_id: str):
-
     document = DocumentModel.objects(id=file_id).first()
-
     if not document:
         raise HTTPException(status_code=404, detail="Document not found")
-
-    if not document.storage_path:
-        raise HTTPException(status_code=404, detail="File path missing")
-
-    if not os.path.exists(document.storage_path):
+    if not document.storage_path or not os.path.exists(document.storage_path):
         raise HTTPException(status_code=404, detail="File not found on disk")
 
     mime_type, _ = mimetypes.guess_type(document.storage_path)
-
     return FileResponse(
         path=document.storage_path,
         media_type=mime_type or "application/octet-stream",
-        headers={
-            "Content-Disposition": "inline"
-        }
+        headers={"Content-Disposition": "inline"}
     )
-
-

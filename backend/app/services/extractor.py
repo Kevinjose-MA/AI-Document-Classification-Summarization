@@ -21,12 +21,12 @@ logger = logging.getLogger(__name__)
 # Pipeline constants
 # ─────────────────────────────────────────────────────────────────────────────
 
-_CHUNK_TOKENS_TARGET   = 1_500   # ~1,100 words — safe below 200K context window
-_CHUNK_OVERLAP_TOKENS  = 150     # carry-forward for cross-boundary context
-_MIN_CHUNK_TOKENS      = 200     # merge undersized tail chunks
-_MAP_MAX_TOKENS        = 600     # per-chunk summary — kept tight
-_REDUCE_MAX_TOKENS     = 2_000   # final consolidation
-_MAX_CONCURRENT_CALLS  = 8       # ThreadPoolExecutor max workers
+_CHUNK_TOKENS_TARGET   = 1_500
+_CHUNK_OVERLAP_TOKENS  = 150
+_MIN_CHUNK_TOKENS      = 200
+_MAP_MAX_TOKENS        = 600
+_REDUCE_MAX_TOKENS     = 2_000
+_MAX_CONCURRENT_CALLS  = 8
 
 
 # -------------------------
@@ -34,14 +34,9 @@ _MAX_CONCURRENT_CALLS  = 8       # ThreadPoolExecutor max workers
 # -------------------------
 
 def extract_text_from_pdf(file_bytes: bytes) -> str:
-    """
-    PDFs have an embedded text layer — OCR is not needed.
-    Extracts text preserving reading order via block layout mode.
-    """
     pages = []
     with fitz.open(stream=file_bytes, filetype="pdf") as doc:
-        for page_num, page in enumerate(doc):
-            # sort=True preserves reading order across columns/tables
+        for page in doc:
             blocks = page.get_text("blocks", sort=True)
             page_text = "\n".join(
                 b[4] for b in blocks if isinstance(b[4], str)
@@ -52,10 +47,6 @@ def extract_text_from_pdf(file_bytes: bytes) -> str:
 
 
 def extract_text_from_docx(file_bytes: bytes) -> str:
-    """
-    Extracts text from paragraphs AND tables.
-    Original only read paragraphs, silently dropping all table content.
-    """
     doc = docx.Document(BytesIO(file_bytes))
     parts = []
     for element in doc.element.body:
@@ -82,11 +73,6 @@ def extract_text_from_txt(file_bytes: bytes) -> str:
 
 
 def extract_text_from_eml(file_bytes: bytes) -> str:
-    """
-    Collects ALL readable parts from multipart emails.
-    Original returned on first match, silently dropping the rest.
-    Prefers plain text; falls back to stripped HTML only if no plain text found.
-    """
     msg = email.message_from_bytes(file_bytes, policy=policy.default)
     plain_parts = []
     html_parts = []
@@ -108,19 +94,9 @@ def extract_text_from_eml(file_bytes: bytes) -> str:
     return "\n\n".join(html_parts)
 
 
-# -------------------------
-# Text extraction from image
-# -------------------------
-
 def _summarize_image_with_vision(file_bytes: bytes, filename: str) -> dict:
-    """
-    Uses Claude vision to extract and summarize image content directly.
-    Handles screenshots, diagrams, flowcharts, scanned forms — anything
-    Tesseract would struggle with. Returns the same dict shape as generate_summary.
-    """
     import base64
 
-    # Detect mime type from image header bytes
     mime = "image/png"
     if file_bytes[:3] == b"\xff\xd8\xff":
         mime = "image/jpeg"
@@ -168,16 +144,11 @@ def _summarize_image_with_vision(file_bytes: bytes, filename: str) -> dict:
 
 
 def extract_text_from_image(file_bytes: bytes) -> str:
-    """
-    Kept for interface compatibility but images are handled via vision in
-    extract_clauses — this is only called if something routes here directly.
-    Returns empty string since text extraction from images requires OCR or vision.
-    """
     return ""
 
 
 # -------------------------
-# OCR noise cleaning (internal)
+# OCR noise cleaning
 # -------------------------
 
 def _char_entropy(s: str) -> float:
@@ -196,14 +167,12 @@ def _is_garbage_line(line: str) -> bool:
     alnum_ratio = sum(c.isalnum() for c in line) / len(line)
     if alnum_ratio < 0.4:
         return True
-    # Very low entropy = repeated noise characters
     if _char_entropy(line) < 2.0 and len(line) > 20:
         return True
     return False
 
 
 def _clean_extracted_text(text: str) -> str:
-    """Strip OCR artefacts and garbage lines before any LLM call."""
     import unicodedata
     text = unicodedata.normalize("NFKC", text)
     text = re.sub(r"[\x00-\x08\x0b-\x0c\x0e-\x1f\x7f]", "", text)
@@ -217,9 +186,37 @@ def _clean_extracted_text(text: str) -> str:
     return "\n".join(clean_lines).strip()
 
 
-# -------------------------
-# Department detection  ✅ PRESERVED
-# -------------------------
+# ─────────────────────────────────────────────────────────────────────────────
+# Department detection  — context-aware
+#
+# Priority order:
+#   1. Email context signals (subject + body) — strongest signal
+#   2. Filename signals
+#   3. Document content keyword frequency
+#
+# This prevents "software engineering" in a resume from routing to Engineering
+# when the email subject clearly says "Job Application".
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Intent signals that override content-based routing
+_HR_INTENT_SIGNALS = [
+    "job application", "applying for", "application for",
+    "cover letter", "resume", "cv", "curriculum vitae",
+    "interview", "hiring", "recruitment", "candidate",
+    "position", "vacancy", "opening", "refer a friend",
+]
+
+_LEGAL_INTENT_SIGNALS = [
+    "contract", "agreement", "nda", "non-disclosure",
+    "terms and conditions", "legal notice", "lawsuit",
+    "litigation", "compliance", "regulation",
+]
+
+_FINANCE_INTENT_SIGNALS = [
+    "invoice", "payment", "receipt", "billing", "purchase order",
+    "payslip", "salary slip", "bank statement", "expense",
+    "quotation", "quote", "tax", "gst",
+]
 
 DEPARTMENT_KEYWORDS = {
     "hr": [
@@ -241,19 +238,65 @@ DEPARTMENT_KEYWORDS = {
 }
 
 
-def detect_department(text: str, filename: str) -> str:
+def _check_intent_signals(text: str) -> str | None:
     """
-    Signature preserved. Now uses frequency scoring instead of returning
-    on first keyword match — prevents a single mention of 'api' from
-    misclassifying a finance doc as Engineering.
+    Scan text for high-confidence intent signals.
+    Returns a department string if a strong signal is found, else None.
+    These take priority over content keyword scoring.
     """
+    haystack = text.lower()
+
+    for signal in _HR_INTENT_SIGNALS:
+        if signal in haystack:
+            return "Hr"
+
+    for signal in _LEGAL_INTENT_SIGNALS:
+        if signal in haystack:
+            return "Legal"
+
+    for signal in _FINANCE_INTENT_SIGNALS:
+        if signal in haystack:
+            return "Finance"
+
+    return None
+
+
+def detect_department(text: str, filename: str, email_context: dict = None) -> str:
+    """
+    Context-aware department routing.
+
+    If email_context is provided, the subject + body are checked for intent
+    signals FIRST before falling back to document content keyword scoring.
+    This ensures a resume sent with subject "Job Application" routes to HR
+    even if the document body contains words like "software engineering".
+    """
+    # ── Step 1: Email context intent (strongest signal) ──────────────────────
+    if email_context:
+        context_text = " ".join([
+            email_context.get("subject", ""),
+            email_context.get("body", ""),
+        ])
+        dept = _check_intent_signals(context_text)
+        if dept:
+            logger.info(f"[ROUTING] Department '{dept}' determined from email context")
+            return dept
+
+    # ── Step 2: Filename intent signals ──────────────────────────────────────
+    dept = _check_intent_signals(filename)
+    if dept:
+        logger.info(f"[ROUTING] Department '{dept}' determined from filename")
+        return dept
+
+    # ── Step 3: Document content keyword frequency ────────────────────────────
+    # Only reached when no intent signal found in email or filename.
+    # Uses frequency scoring (not first-match) to avoid misclassification.
     haystack = f"{filename} {text}".lower()
     scores: dict = {}
 
-    for dept, keywords in DEPARTMENT_KEYWORDS.items():
+    for dept_name, keywords in DEPARTMENT_KEYWORDS.items():
         score = sum(haystack.count(kw) for kw in keywords)
         if score > 0:
-            scores[dept] = score
+            scores[dept_name] = score
 
     if not scores:
         return "General"
@@ -262,7 +305,7 @@ def detect_department(text: str, filename: str) -> str:
 
 
 # -------------------------
-# Chunking (internal)
+# Chunking
 # -------------------------
 
 def _estimate_tokens(text: str) -> int:
@@ -270,10 +313,6 @@ def _estimate_tokens(text: str) -> int:
 
 
 def _chunk_text(text: str) -> list:
-    """
-    Split cleaned text into overlapping chunks at sentence boundaries.
-    Replaces the old text[:4000] slice — ensures the full document is processed.
-    """
     sentences = re.split(r"(?<=[.!?])\s+(?=[A-Z])", text.strip())
     sentences = [s.strip() for s in sentences if s.strip()]
 
@@ -305,7 +344,7 @@ def _chunk_text(text: str) -> list:
 
 
 # -------------------------
-# Clause logic              ✅ PRESERVED
+# Clause logic
 # -------------------------
 
 SECTION_KEYWORDS = [
@@ -322,10 +361,6 @@ def extract_tags(text: str):
     return list(set(w for w in words if len(w) > 3 and w not in ENGLISH_STOP_WORDS))
 
 def split_into_clauses(text: str):
-    """
-    Preserved exactly. Added paragraph fallback so non-insurance docs
-    don't return a single giant clause blob.
-    """
     lines = [l.strip() for l in text.split("\n") if l.strip()]
     clauses, buffer, section = [], "", "General"
     found_heading = False
@@ -351,7 +386,6 @@ def split_into_clauses(text: str):
             "tags": extract_tags(buffer)
         })
 
-    # Fallback: no headings found → split by paragraphs
     if not found_heading or not clauses:
         paragraphs = re.split(r"\n{2,}", text.strip())
         clauses = [
@@ -374,13 +408,6 @@ _MAP_SYSTEM = (
 )
 
 def _map_prompt(chunk: dict, total_chunks: int) -> str:
-    """
-    Uses a plain labelled-line format instead of JSON template.
-    Embedding document text inside a JSON template causes parse failures
-    whenever the text contains quotes, backslashes, or newlines.
-    Plain text output is parsed in Python — the LLM never has to produce JSON
-    while also seeing arbitrary document content.
-    """
     cid = chunk["chunk_id"]
     position = "opening" if cid == 0 else ("closing" if cid == total_chunks - 1 else "middle")
     return (
@@ -399,10 +426,6 @@ def _map_prompt(chunk: dict, total_chunks: int) -> str:
 
 
 def _parse_map_response(raw: str, chunk_id: int) -> dict:
-    """
-    Parse the labelled-line map response into a structured dict.
-    This format is robust to document content containing quotes or special chars.
-    """
     def extract_label(text: str, label: str) -> str:
         m = re.search(rf"^{label}:\s*(.+?)(?=\n[A-Z]+:|$)", text, re.MULTILINE | re.DOTALL)
         return m.group(1).strip() if m else ""
@@ -412,7 +435,6 @@ def _parse_map_response(raw: str, chunk_id: int) -> dict:
             return []
         return [v.strip() for v in val.split(",") if v.strip() and v.strip().upper() != "NONE"]
 
-    # Extract POINTS block as bullet list
     points_match = re.search(r"^POINTS:\n(.*?)(?=\n[A-Z]+:|$)", raw, re.MULTILINE | re.DOTALL)
     points_raw = points_match.group(1) if points_match else ""
     key_points = [
@@ -438,18 +460,16 @@ def _parse_map_response(raw: str, chunk_id: int) -> dict:
     }
 
 
-def _reduce_prompt(chunk_results: list, filename: str) -> str:
+def _reduce_prompt(chunk_results: list, filename: str, email_context: dict = None) -> str:
     """
-    Reduce prompt also avoids embedding structured data inside a JSON template.
-    Summaries are passed as plain labelled blocks; JSON is requested separately
-    at the end where the model only needs to produce JSON, not read it.
+    Reduce prompt now includes email context so the final summary
+    reflects WHY the document arrived, not just what it contains.
     """
     segments_text = "\n\n".join(
         f"[Segment {r['chunk_id'] + 1}{'  DEGRADED' if r.get('degraded') else ''}]\n"
         f"{r.get('local_summary', '[unavailable]')}"
         for r in chunk_results
     )
-    # Merge and deduplicate entities in Python
     merged: dict = {"people": [], "organizations": [], "dates": [], "figures": [], "locations": []}
     for r in chunk_results:
         for key in merged:
@@ -469,17 +489,30 @@ def _reduce_prompt(chunk_results: list, filename: str) -> str:
         for k, v in merged.items()
     )
 
+    # Inject email context block if available
+    email_context_block = ""
+    if email_context:
+        email_context_block = (
+            f"\nEMAIL CONTEXT (how this document arrived):\n"
+            f"Subject: {email_context.get('subject', 'N/A')}\n"
+            f"From: {email_context.get('from', 'N/A')}\n"
+            f"Body excerpt: {email_context.get('body', '')[:500]}\n\n"
+            "Use the email context to inform the purpose field — explain not just "
+            "what the document contains but why it was sent.\n"
+        )
+
     return (
         f"Document: {filename}\n"
         f"Segments analyzed: {len(chunk_results)} | "
-        f"Degraded: {sum(1 for r in chunk_results if r.get('degraded'))}\n\n"
+        f"Degraded: {sum(1 for r in chunk_results if r.get('degraded'))}\n"
+        f"{email_context_block}"
         f"ENTITIES FOUND:\n{entity_lines}\n\n"
         f"SEGMENT SUMMARIES:\n{segments_text}\n\n"
         "Based on the above, produce a JSON object with these exact keys. "
         "Values must be plain strings or arrays of strings — no nested objects, "
         "no special characters that would break JSON parsing:\n"
         '{\n'
-        '  "purpose": "3-5 sentence overview of why this document exists",\n'
+        '  "purpose": "3-5 sentence overview of why this document exists and why it was sent",\n'
         '  "key_points": ["finding 1", "finding 2", "finding 3"],\n'
         '  "risks_or_implications": "obligations or risks in one paragraph",\n'
         '  "data_quality_notes": "any extraction issues or none identified",\n'
@@ -491,26 +524,16 @@ def _reduce_prompt(chunk_results: list, filename: str) -> str:
 
 
 def _parse_json(raw: str) -> dict:
-    """
-    Robust JSON parser with multiple fallback strategies:
-    1. Strip markdown fences
-    2. Extract first {...} block if there is surrounding text
-    3. Fix common LLM JSON mistakes (trailing commas, single quotes)
-    """
     clean = raw.strip()
-
-    # Strip markdown fences
     clean = re.sub(r"^```(?:json)?\s*", "", clean, flags=re.MULTILINE)
     clean = re.sub(r"```\s*$", "", clean, flags=re.MULTILINE)
     clean = clean.strip()
 
-    # Try direct parse first
     try:
         return json.loads(clean)
     except json.JSONDecodeError:
         pass
 
-    # Extract first complete {...} block — handles models that add preamble text
     brace_match = re.search(r"\{[\s\S]*\}", clean)
     if brace_match:
         candidate = brace_match.group(0)
@@ -519,19 +542,16 @@ def _parse_json(raw: str) -> dict:
         except json.JSONDecodeError:
             pass
 
-        # Fix trailing commas before } or ]
         fixed = re.sub(r",\s*([}\]])", r"\1", candidate)
         try:
             return json.loads(fixed)
         except json.JSONDecodeError:
             pass
 
-    # Last resort: raise with the cleaned content for logging
     raise json.JSONDecodeError(f"Could not parse JSON from response", clean, 0)
 
 
 def _summarize_chunk_sync(chunk: dict, total_chunks: int) -> dict:
-    """Sync per-chunk call with 3x exponential backoff. Never raises — degrades gracefully."""
     import time
     last_error = None
     for attempt in range(3):
@@ -557,7 +577,6 @@ def _summarize_chunk_sync(chunk: dict, total_chunks: int) -> dict:
 
 
 def _run_map_phase(chunks: list) -> list:
-    """Concurrent chunk summarization via ThreadPoolExecutor."""
     from concurrent.futures import ThreadPoolExecutor, as_completed
     total = len(chunks)
     results = [None] * total
@@ -575,17 +594,10 @@ def _run_map_phase(chunks: list) -> list:
 
 
 # -------------------------
-# Summary generation        ✅ SIGNATURE PRESERVED
+# Summary generation
 # -------------------------
 
-def generate_summary(text: str) -> dict:
-    """
-    Signature preserved exactly:
-        generate_summary(text: str) -> {"purpose": str, "key_points": list, "risks_or_implications": str}
-
-    Internals replaced: now runs full map-reduce pipeline instead of
-    truncating to text[:4000] in a single LLM call.
-    """
+def generate_summary(text: str, email_context: dict = None) -> dict:
     if not text or len(text.strip()) < 50:
         return {
             "purpose": "Insufficient content available.",
@@ -596,14 +608,12 @@ def generate_summary(text: str) -> dict:
     clean = _clean_extracted_text(text)
     chunks = _chunk_text(clean)
 
-    # Single-chunk shortcut — skip map phase for small documents
     if len(chunks) == 1:
         chunk_results = [_summarize_chunk_sync(chunks[0], 1)]
     else:
         chunk_results = _run_map_phase(chunks)
 
-    # Reduce phase with one repair attempt on JSON failure
-    prompt = _reduce_prompt(chunk_results, filename="document")
+    prompt = _reduce_prompt(chunk_results, filename="document", email_context=email_context)
     for attempt in range(2):
         try:
             raw = generate_text_completion(prompt, max_tokens=_REDUCE_MAX_TOKENS)
@@ -630,17 +640,17 @@ def generate_summary(text: str) -> dict:
 
 
 # -------------------------
-# Main entry                ✅ SIGNATURE PRESERVED
+# Main entry point
 # -------------------------
 
-def extract_clauses_from_bytes(file_bytes: bytes, filename: str, enrich=True):
+def extract_clauses_from_bytes(file_bytes: bytes, filename: str, enrich=True,
+                                email_context: dict = None):
     """
-    Primary entry point — works directly on in-memory bytes.
-    No temp files, no disk I/O. Called by ingestion service.
+    Primary entry point. email_context is optional — when provided (email ingestion),
+    routing and summary generation use it to understand document intent.
     """
     ext = os.path.splitext(filename)[1].lower()
 
-    # ── Text Extraction ───────────────────────────────────────────────────────
     if ext == ".pdf":
         raw_text = extract_text_from_pdf(file_bytes)
     elif ext in [".doc", ".docx"]:
@@ -650,7 +660,6 @@ def extract_clauses_from_bytes(file_bytes: bytes, filename: str, enrich=True):
     elif ext == ".eml":
         raw_text = extract_text_from_eml(file_bytes)
     elif ext in [".png", ".jpg", ".jpeg"]:
-        # Images handled entirely via vision — skip text pipeline
         if enrich:
             vision_summary = _summarize_image_with_vision(file_bytes, filename)
             return {
@@ -666,17 +675,14 @@ def extract_clauses_from_bytes(file_bytes: bytes, filename: str, enrich=True):
     else:
         raw_text = extract_text_from_pdf(file_bytes)
 
-    # ── OCR Cleaning ──────────────────────────────────────────────────────────
     raw_text = _clean_extracted_text(raw_text)
-
-    # ── Clause Splitting ──────────────────────────────────────────────────────
     clauses = split_into_clauses(raw_text)
 
     metadata = {}
 
     if enrich:
-        metadata["summary"]        = generate_summary(raw_text)
-        metadata["department"]     = detect_department(raw_text, filename)
+        metadata["summary"]        = generate_summary(raw_text, email_context=email_context)
+        metadata["department"]     = detect_department(raw_text, filename, email_context=email_context)
         metadata["sensitivity"]    = "medium"
         metadata["routing_status"] = "review"
 
@@ -687,10 +693,7 @@ def extract_clauses_from_bytes(file_bytes: bytes, filename: str, enrich=True):
 
 
 def extract_clauses(file_path: str, enrich=True):
-    """
-    Legacy entry point — reads file from disk then delegates to extract_clauses_from_bytes.
-    Kept so any callers outside ingestion still work without changes.
-    """
+    """Legacy entry point — reads from disk, delegates to extract_clauses_from_bytes."""
     with open(file_path, "rb") as f:
         file_bytes = f.read()
     filename = os.path.basename(file_path)

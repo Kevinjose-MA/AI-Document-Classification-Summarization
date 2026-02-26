@@ -9,18 +9,16 @@ from mongoengine import (
 )
 from datetime import datetime
 
+
 # ------------------------------
 # User Model (RBAC enabled)
 # ------------------------------
 class UserModel(Document):
     email = StringField(required=True, unique=True)
-    password = StringField(required=True)  # hashed password
+    password = StringField(required=True)   # hashed
     name = StringField()
-
-    # Add username for future use
     username = StringField(unique=True, required=True)
 
-    # 🔐 Role-Based Access Control
     role = StringField(
         choices=["admin", "hr", "legal", "engineering", "finance", "user"],
         default="user"
@@ -37,41 +35,51 @@ class UserModel(Document):
 
 
 # ------------------------------
+# Per-user Email Credential Model
+# Stores each user's connected inbox so email ingestion is truly per-user.
+# Passwords are stored as-is here; in production encrypt at rest with Fernet/KMS.
+# ------------------------------
+class EmailCredentialModel(Document):
+    user_id = StringField(required=True, unique=True)   # one inbox per user for now
+    imap_host = StringField(required=True, default="imap.gmail.com")
+    imap_port = IntField(default=993)
+    email_address = StringField(required=True)
+    email_password = StringField(required=True)         # app password / OAuth token
+    is_active = BooleanField(default=True)
+    connected_at = DateTimeField(default=datetime.utcnow)
+    last_synced_at = DateTimeField()
+
+    meta = {
+        "collection": "email_credentials",
+        "indexes": ["user_id"]
+    }
+
+
+# ------------------------------
 # Document Model
 # ------------------------------
 class DocumentModel(Document):
-    # ------------------------------
-    # Core fields
-    # ------------------------------
-    user_id = StringField(required=True)          # maps to uploadedBy in old data
+    user_id = StringField(required=True)
     filename = StringField(required=True)
-    file_hash = StringField(required=True)        # for deduplication
-    file_size = IntField()                        # size in bytes (was StringField)
-    content_type = StringField()                  # MIME type
-    version = IntField(default=1)                 # numeric version (was StringField)
-    source = StringField(default="manual")       # manual / email / whatsapp etc
+    file_hash = StringField(required=True)
+    file_size = IntField()
+    content_type = StringField()
+    version = IntField(default=1)
+    source = StringField(default="manual")      # manual | email
     purpose = StringField()
     received_at = DateTimeField(default=datetime.utcnow)
 
-    # ------------------------------
-    # Storage / encryption (NEW)
-    # ------------------------------
-    storage_path = StringField()                  # physical file path
+    storage_path = StringField()
     encrypted_external = BooleanField(default=False)
 
-    # ------------------------------
-    # New metadata fields
-    # ------------------------------
     summary = DictField()
-    department = StringField()                    # HR / Legal / Finance / etc
-    sensitivity = StringField()                   # low / medium / high
-    routing_status = StringField()                # routed / restricted / pending
+    department = StringField()
+    sensitivity = StringField()
+    routing_status = StringField()
     clauses = ListField(DictField())
     status = StringField(default="processing")
 
-    # ------------------------------
-    # Legacy fields (from existing DB)
-    # ------------------------------
+    # Legacy fields
     title = StringField()
     url = StringField()
     uploadedBy = StringField()
@@ -81,5 +89,5 @@ class DocumentModel(Document):
     meta = {
         "collection": "documents",
         "indexes": ["user_id", "department", "file_hash"],
-        "strict": False  # allows unknown fields, just in case
+        "strict": False
     }
