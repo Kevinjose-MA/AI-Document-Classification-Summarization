@@ -67,7 +67,12 @@ async def list_documents(user=Depends(get_current_user)):
     def _query():
         if user["role"].lower() == "admin":
             return list(DocumentModel.objects())
-        return list(DocumentModel.objects(user_id=str(user["user_id"])))
+        return list(DocumentModel.objects(__raw__={
+            "$or": [
+                {"user_id":    str(user["user_id"])},
+                {"department": user["role"].lower()},
+            ]
+        }))
 
     docs = await asyncio.to_thread(_query)
 

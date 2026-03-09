@@ -4,6 +4,7 @@ from typing import List, Union, Dict
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.services.extractor import extract_clauses
+from app.api.ingestion_sources import router as ingestion_router
 from app.services.parser import extract_dynamic_keywords_from_clauses, parse_query_with_dynamic_map
 from sentence_transformers import SentenceTransformer
 from transformers import AutoTokenizer
@@ -55,6 +56,7 @@ app.add_middleware(
 
 app.include_router(auth_router, prefix="/api/v1", tags=["Auth"])
 app.include_router(documents_router, prefix="/api/v1", tags=["Documents"])
+app.include_router(ingestion_router, prefix="/api/v1")
 
 # Embedding model and tokenizer
 model = SentenceTransformer("sentence-transformers/all-MiniLM-L12-v2")

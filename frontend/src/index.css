@@ -1,1 +1,148 @@
 @import "tailwindcss";
+@import url('https://fonts.googleapis.com/css2?family=Sora:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
+
+:root {
+  --navy:        #080E1A;
+  --navy-2:      #0D1525;
+  --navy-3:      #111D2E;
+  --navy-4:      #162035;
+  --navy-5:      #1C2840;
+  --teal:        #00C2D4;
+  --teal-dim:    #0096A6;
+  --teal-glow:   rgba(0,194,212,0.10);
+  --teal-line:   rgba(0,194,212,0.25);
+  --amber:       #F59E0B;
+  --red:         #EF4444;
+  --emerald:     #10B981;
+  --surface:     #F0F4FA;
+  --surface-2:   #E8EDF5;
+  --border:      #DDE3EE;
+  --border-2:    #C8D0DE;
+  --text:        #0D1525;
+  --text-2:      #4A5568;
+  --text-3:      #8896A8;
+  --sidebar-w:   240px;
+}
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; }
+
+html, body {
+  font-family: 'Sora', system-ui, sans-serif;
+  background: var(--surface);
+  color: var(--text);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ── Mono override ── */
+.font-mono, code { font-family: 'JetBrains Mono', monospace; }
+
+/* ── Animations ── */
+@keyframes fadeUp {
+  from { opacity: 0; transform: translateY(12px); }
+  to   { opacity: 1; transform: translateY(0);    }
+}
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.3; }
+}
+@keyframes toastIn {
+  from { opacity: 0; transform: translateX(24px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+@keyframes shimmer {
+  0%   { background-position: -400px 0; }
+  100% { background-position: 400px 0; }
+}
+@keyframes scan {
+  0%   { transform: translateY(-100%); opacity: 0.6; }
+  100% { transform: translateY(400%); opacity: 0; }
+}
+
+.fade-up { animation: fadeUp 0.35s cubic-bezier(0.22,1,0.36,1) both; }
+.d1 { animation-delay: 0.04s; }
+.d2 { animation-delay: 0.09s; }
+.d3 { animation-delay: 0.14s; }
+.d4 { animation-delay: 0.19s; }
+.d5 { animation-delay: 0.24s; }
+.d6 { animation-delay: 0.29s; }
+.d7 { animation-delay: 0.34s; }
+
+.toast-in { animation: toastIn 0.22s cubic-bezier(0.22,1,0.36,1) both; }
+
+/* ── Skeleton shimmer ── */
+.shimmer {
+  background: linear-gradient(90deg, #E8EDF5 25%, #F5F8FF 50%, #E8EDF5 75%);
+  background-size: 800px 100%;
+  animation: shimmer 1.4s infinite;
+}
+
+/* ── Sidebar grid texture ── */
+.sidebar-grid {
+  background-color: var(--navy);
+  background-image:
+    linear-gradient(rgba(255,255,255,0.015) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255,255,255,0.015) 1px, transparent 1px);
+  background-size: 28px 28px;
+}
+
+/* ── Table rows ── */
+.doc-row:hover { background: #F5F8FF; }
+.doc-row:hover td:first-child { border-left: 2px solid var(--teal); }
+
+/* ── Scrollbar ── */
+::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar-thumb { background: #C8D0DE; border-radius: 8px; }
+::-webkit-scrollbar-track { background: transparent; }
+
+/* ── AI pulse dot ── */
+.ai-pulse { animation: pulse-dot 1.8s ease-in-out infinite; }
+
+/* ── Scan line for AI badge ── */
+.ai-scan::after {
+  content: '';
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, rgba(0,194,212,0.6), transparent);
+  animation: scan 2s linear infinite;
+}
+
+/* ── Panel card ── */
+.panel {
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+
+/* ── Stat number ── */
+.stat-number {
+  font-size: 2rem;
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: -0.04em;
+}
+
+/* ── Risk badge ── */
+.risk-critical { color: #DC2626; background: #FEF2F2; border: 1px solid #FCA5A5; }
+.risk-high     { color: #EA580C; background: #FFF7ED; border: 1px solid #FDBA74; }
+.risk-medium   { color: #D97706; background: #FFFBEB; border: 1px solid #FCD34D; }
+.risk-low      { color: #059669; background: #ECFDF5; border: 1px solid #6EE7B7; }
+
+/* ── Volume bar ── */
+.vol-bar {
+  transition: width 0.8s cubic-bezier(0.22,1,0.36,1);
+}
+
+/* ── Confidence ring ── */
+.conf-ring {
+  stroke-dasharray: 100;
+  stroke-dashoffset: calc(100 - var(--pct));
+  transition: stroke-dashoffset 1s ease;
+}
+
+/* ── Highlighted insight ── */
+.insight-row:hover { background: #F5F8FF; border-color: var(--teal-line); }

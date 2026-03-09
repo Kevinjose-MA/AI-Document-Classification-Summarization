@@ -1,46 +1,56 @@
-import React from "react";
+// components/DocumentCard.jsx
 import { useNavigate } from "react-router-dom";
 import StatusBadge from "./StatusBadge";
 
+const FILE_ICONS = {
+  pdf:  { bg: "bg-red-50",   text: "text-red-500",   label: "PDF"  },
+  docx: { bg: "bg-blue-50",  text: "text-blue-500",  label: "DOC"  },
+  doc:  { bg: "bg-blue-50",  text: "text-blue-500",  label: "DOC"  },
+  txt:  { bg: "bg-gray-50",  text: "text-gray-500",  label: "TXT"  },
+  png:  { bg: "bg-green-50", text: "text-green-500", label: "IMG"  },
+  jpg:  { bg: "bg-green-50", text: "text-green-500", label: "IMG"  },
+  jpeg: { bg: "bg-green-50", text: "text-green-500", label: "IMG"  },
+  eml:  { bg: "bg-purple-50",text: "text-purple-500",label: "EML"  },
+};
+
 export default function DocumentCard({ doc }) {
   const navigate = useNavigate();
+  const ext = doc.filename?.split(".").pop()?.toLowerCase();
+  const icon = FILE_ICONS[ext] || { bg: "bg-gray-50", text: "text-gray-400", label: "FILE" };
 
   return (
     <div
       onClick={() => navigate(`/documents/${doc.id}`)}
-      className="bg-white rounded-xl border shadow-sm p-6 cursor-pointer
-                 hover:shadow-md hover:-translate-y-1
-                 transition duration-200 overflow-hidden"
+      className="bg-white rounded-xl border border-gray-200 p-5 cursor-pointer
+                 hover:border-blue-300 hover:shadow-md transition-all duration-200 group"
     >
-      <div className="flex justify-between items-start gap-4">
-        
-        {/* This wrapper MUST have min-w-0 */}
+      <div className="flex items-start gap-3">
+        {/* File type badge */}
+        <div className={`shrink-0 w-10 h-10 rounded-lg ${icon.bg} flex items-center justify-center`}>
+          <span className={`text-xs font-bold ${icon.text}`}>{icon.label}</span>
+        </div>
+
+        {/* File info */}
         <div className="flex-1 min-w-0">
-          
-          {/* Force proper truncation */}
-          <h2 className="font-semibold text-lg text-gray-800 
-                         overflow-hidden text-ellipsis whitespace-nowrap">
+          <h2 className="text-sm font-semibold text-gray-900 truncate group-hover:text-blue-600 transition-colors">
             {doc.filename}
           </h2>
-
-          <p className="text-sm text-gray-500 break-all">
-            Purpose: {doc.purpose || "Not specified"}
+          <p className="text-xs text-gray-400 mt-0.5 truncate">
+            {doc.purpose || "No purpose specified"}
           </p>
         </div>
 
-        {/* Prevent badge from shrinking layout */}
-        <div className="shrink-0">
-          <StatusBadge status={doc.status} />
-        </div>
+        <StatusBadge status={doc.status} />
       </div>
 
-      <div className="mt-5 flex justify-between items-center text-sm text-gray-500">
-        <span>
-          {new Date(doc.received_at).toLocaleDateString()}
-        </span>
-
-        <span className="text-blue-600 font-medium">
-          View →
+      <div className="mt-4 pt-3 border-t border-gray-100 flex justify-between items-center">
+        <div className="flex items-center gap-2">
+          <StatusBadge status={doc.routing_status} />
+        </div>
+        <span className="text-xs text-gray-400">
+          {new Date(doc.received_at).toLocaleDateString("en-US", {
+            month: "short", day: "numeric", year: "numeric"
+          })}
         </span>
       </div>
     </div>

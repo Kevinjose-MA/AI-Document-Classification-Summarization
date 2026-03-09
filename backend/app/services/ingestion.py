@@ -138,7 +138,7 @@ def ingest_file(file_bytes: bytes, filename: str, user_id: str, purpose: str,
         clauses = enriched.get("clauses", [])
         logger.info(f"[INGEST] Clause extraction completed | clauses={len(clauses)}")
 
-    department = metadata.get("department", "General")
+    department = metadata.get("department", "general").strip().lower()
     logger.info(f"[INGEST] Routed to department: {department}")
 
     # ── Persist file ──────────────────────────────────────────────────────────
@@ -155,14 +155,14 @@ def ingest_file(file_bytes: bytes, filename: str, user_id: str, purpose: str,
         file_size=len(file_bytes),
         content_type=content_type,
         version=1,
-        source=source,
+        source=source.strip().lower(),
         purpose=purpose,
         received_at=datetime.utcnow(),
         clauses=clauses,
         summary=metadata.get("summary", {}),
         department=department,
-        sensitivity=metadata.get("sensitivity", "medium"),
-        routing_status=metadata.get("routing_status", "review"),
+        sensitivity=metadata.get("sensitivity", "medium").strip().lower(),
+        routing_status=metadata.get("routing_status", "review").strip().lower(),
         status="locked" if encrypted_external else "ready",
     )
     logger.info("[INGEST] Persisting document to MongoDB")

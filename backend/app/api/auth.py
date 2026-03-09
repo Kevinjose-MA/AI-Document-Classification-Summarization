@@ -120,3 +120,85 @@ def login(data: LoginSchema):
         "token": create_token(user.id, user.role),
         "user": {"email": user.email, "name": user.name, "role": user.role},
     }
+
+class UpdateUserSchema(BaseModel):
+    role:      str | None = None
+    is_active: bool | None = None
+
+
+# ── Add this dependency (improved version of get_current_user_id) ──
+def get_current_user(
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+) -> dict:
+    """Returns full payload dict: user_id, role, exp"""
+    token = credentials.credentials
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=["HS256"])
+        return payload
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token expired")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+
+def require_admin(user: dict = Depends(get_current_user)):
+    if user.get("role", "").lower() != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return user
+
+
+# ── Add these 3 routes at the bottom of auth.py ───────────────
+
+@router.get("/auth/users")
+def list_users(admin=Depends(require_admin)):
+    """Admin only — list all users"""
+    users = UserModel.objects().order_by("-created_at")
+    return [
+        {
+            "id":         str(u.id),
+            "name":       u.name,
+            "username":   u.username,
+            "email":      u.email,
+            "role":       u.role,
+            "is_active":  u.is_active,
+            "created_at": u.created_at.isoformat() if u.created_at else None,
+        }
+        for u in users
+    ]
+
+
+@router.patch("/auth/users/{user_id}")
+def update_user(user_id: str, data: UpdateUserSchema, admin=Depends(require_admin)):
+    """Admin only — update role and/or active status"""
+    user = UserModel.objects(id=user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    VALID_ROLES = ["admin", "hr", "legal", "engineering", "finance", "operations", "compliance", "user"]
+
+    if data.role is not None:
+        if data.role.lower() not in VALID_ROLES:
+            raise HTTPException(status_code=400, detail=f"Invalid role. Choose from: {VALID_ROLES}")
+        user.role = data.role.lower()
+
+    if data.is_active is not None:
+        user.is_active = data.is_active
+
+    user.save()
+    return {
+        "id":        str(user.id),
+        "name":      user.name,
+        "email":     user.email,
+        "role":      user.role,
+        "is_active": user.is_active,
+    }
+
+
+@router.delete("/auth/users/{user_id}")
+def delete_user(user_id: str, admin=Depends(require_admin)):
+    """Admin only — delete a user"""
+    user = UserModel.objects(id=user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    user.delete()
+    return {"message": "User deleted"}
