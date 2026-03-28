@@ -3,26 +3,27 @@ import asyncio
 import imaplib
 import email
 from email import policy
+from email.header import decode_header
 from datetime import datetime
-from fastapi import APIRouter, UploadFile, File, Form, Depends, BackgroundTasks, HTTPException
+from fastapi import APIRouter, UploadFile, File, Depends, BackgroundTasks, HTTPException
 from fastapi.security import HTTPBearer
+from fastapi.responses import Response
 import jwt
-from fastapi.responses import FileResponse
 from bson import ObjectId
 
-from app.models.models import DocumentModel, EmailCredentialModel
+from app.models.models import DocumentModel, EmailCredentialModel, AuditLogModel
 from app.services.ingestion import ingest_upload, ingest_bytes
+from app.services import storage as gridfs_storage
 from app.core.config import SECRET_KEY
 from app.api.auth import get_current_user_id
 
+router    = APIRouter()
+security  = HTTPBearer()
 
-router = APIRouter()
-UPLOAD_DIR = "uploads"
-os.makedirs(UPLOAD_DIR, exist_ok=True)
-
-security = HTTPBearer()
+SUPPORTED_EXTS = {".pdf", ".docx", ".doc", ".xlsx", ".xls", ".png", ".jpg", ".jpeg"}
 
 
+# ── Auth ───────────────────────────────────────────────────────────────────────
 def get_current_user(token=Depends(security)):
     try:
         payload = jwt.decode(token.credentials, SECRET_KEY, algorithms=["HS256"])
@@ -32,138 +33,304 @@ def get_current_user(token=Depends(security)):
     except Exception:
         raise HTTPException(status_code=401, detail="Invalid token")
 
-@router.post("/documents/ingest-email")
-def ingest_email(background_tasks: BackgroundTasks, user=Depends(get_current_user)):
-    cred = EmailCredentialModel.objects(user_id=str(user["user_id"]), is_active=True).first()
-    if not cred:
-        raise HTTPException(
-            status_code=400,
-            detail="No email inbox connected. Use POST /api/v1/email/connect first."
-        )
-    background_tasks.add_task(fetch_email_attachments_for_user, str(user["user_id"]), cred)
-    return {"message": f"Email ingestion started for {cred.email_address}"}
+
+def _log(document_id, filename, event, detail, agent="system",
+         from_status=None, to_status=None, user_id=None, metadata=None):
+    try:
+        AuditLogModel(
+            document_id=str(document_id), filename=filename, event=event,
+            detail=detail, agent=agent, from_status=from_status,
+            to_status=to_status, user_id=user_id, metadata=metadata or {},
+        ).save()
+    except Exception:
+        pass
 
 
-
-
-# -------------------------
-# Manual Upload
-# -------------------------
+# ── Manual upload ──────────────────────────────────────────────────────────────
 @router.post("/documents/upload")
-async def upload_document(
-    file: UploadFile = File(...),
-    background_tasks: BackgroundTasks = None,
-    user=Depends(get_current_user)
-):
+async def upload_document(file: UploadFile = File(...), user=Depends(get_current_user)):
     result = await ingest_upload(file, user_id=str(user["user_id"]), purpose="Manual Upload")
     return result
 
 
-# -------------------------
-# List documents with RBAC
-# -------------------------
+# ── List documents — server-side pagination + RBAC ────────────────────────────
 @router.get("/documents")
-async def list_documents(user=Depends(get_current_user)):
+async def list_documents(
+    user=Depends(get_current_user),
+    page:      int = 1,
+    per_page:  int = 15,
+    dept:      str = None,
+    status:    str = None,
+    source:    str = None,
+    search:    str = None,
+    date_from: str = None,
+    date_to:   str = None,
+):
     def _query():
-        if user["role"].lower() == "admin":
-            return list(DocumentModel.objects())
-        return list(DocumentModel.objects(__raw__={
-            "$or": [
-                {"user_id":    str(user["user_id"])},
-                {"department": user["role"].lower()},
-            ]
-        }))
+        from mongoengine.queryset.visitor import Q
+        from datetime import datetime as dt
 
-    docs = await asyncio.to_thread(_query)
+        role = user["role"].lower()
+        if role == "admin":
+            qs = DocumentModel.objects()
+        elif role in ("engineering","finance","legal","hr","operations","compliance","general"):
+            qs = DocumentModel.objects(Q(user_id=str(user["user_id"])) | Q(department=role))
+        else:
+            qs = DocumentModel.objects(user_id=str(user["user_id"]))
 
-    return [
-        {
-            "id":             str(d.id),
-            "filename":       d.filename,
-            "purpose":        d.purpose,
-            "received_at":    d.received_at,
-            "status":         d.status,
-            "summary":        d.summary,
-            "department":     d.department,
-            "sensitivity":    d.sensitivity,
-            "routing_status": d.routing_status,
-            "uploaded_by":    d.user_id,
-            "source":         d.source,
-        }
-        for d in docs
-    ]
+        if dept:
+            qs = qs.filter(department__icontains=dept)
+        if status:
+            qs = qs.filter(routing_status=status)
+        if source:
+            qs = qs.filter(source=source)
+        if search:
+            qs = qs.filter(Q(filename__icontains=search) | Q(purpose__icontains=search))
+        if date_from:
+            try: qs = qs.filter(received_at__gte=dt.fromisoformat(date_from))
+            except ValueError: pass
+        if date_to:
+            try: qs = qs.filter(received_at__lte=dt.fromisoformat(date_to))
+            except ValueError: pass
 
+        total  = qs.count()
+        offset = (page - 1) * per_page
+        docs   = list(qs.order_by("-received_at").skip(offset).limit(per_page))
+        return docs, total
 
-# -------------------------
-# Get single document by ID
-# -------------------------
-@router.get("/documents/{doc_id}")
-async def get_document(doc_id: str, user=Depends(get_current_user)):
-    doc = await asyncio.to_thread(lambda: DocumentModel.objects(id=doc_id).first())
-
-    if not doc:
-        raise HTTPException(status_code=404, detail="Document not found")
-    if user["role"].lower() != "admin" and str(doc.user_id) != str(user["user_id"]):
-        raise HTTPException(status_code=403, detail="Access denied")
+    docs, total = await asyncio.to_thread(_query)
+    pages = max(1, -(-total // per_page))
 
     return {
-        "id":             str(doc.id),
-        "filename":       doc.filename,
-        "purpose":        doc.purpose,
-        "received_at":    doc.received_at,
-        "status":         doc.status,
-        "summary":        doc.summary,
-        "department":     doc.department,
-        "sensitivity":    doc.sensitivity,
-        "routing_status": doc.routing_status,
-        "clauses":        doc.clauses,
-        "uploaded_by":    doc.user_id,
-        "source":         doc.source,
+        "total": total, "page": page, "per_page": per_page, "pages": pages,
+        "results": [
+            {
+                "id":             str(d.id),
+                "filename":       d.filename,
+                "purpose":        d.purpose,
+                "received_at":    d.received_at,
+                "status":         d.status,
+                "summary":        d.summary,
+                "department":     d.department,
+                "sensitivity":    d.sensitivity,
+                "routing_status": d.routing_status,
+                "source":         getattr(d, "source", "manual"),
+                "document_type":  getattr(d, "document_type", None),
+                "risk_level":     getattr(d, "risk_level", None),
+                "language":       getattr(d, "language", None),
+                "confidence":     getattr(d, "confidence", None),
+                "uploaded_by":    d.user_id,
+            }
+            for d in docs
+        ],
     }
 
 
-# ============================================================
-# Email Credential Management
-# ============================================================
+# ── Single document ────────────────────────────────────────────────────────────
+@router.get("/documents/{doc_id}")
+async def get_document(doc_id: str, user=Depends(get_current_user)):
+    doc = await asyncio.to_thread(lambda: DocumentModel.objects(id=doc_id).first())
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
 
+    role = user["role"].lower()
+    if role != "admin":
+        owns = str(doc.user_id) == str(user["user_id"])
+        dept_match = doc.department and doc.department.lower() == role
+        if not owns and not dept_match:
+            raise HTTPException(status_code=403, detail="Access denied")
+
+    return {
+        "id":                str(doc.id),
+        "filename":          doc.filename,
+        "purpose":           doc.purpose,
+        "received_at":       doc.received_at,
+        "status":            doc.status,
+        "summary":           doc.summary,
+        "department":        doc.department,
+        "sensitivity":       doc.sensitivity,
+        "routing_status":    doc.routing_status,
+        "clauses":           doc.clauses,
+        "uploaded_by":       doc.user_id,
+        "source":            doc.source,
+        "document_type":     getattr(doc, "document_type", None),
+        "risk_level":        getattr(doc, "risk_level", None),
+        "language":          getattr(doc, "language", None),
+        "confidence":        getattr(doc, "confidence", None),
+        "encrypted_external": doc.encrypted_external,
+        "file_id":           doc.file_id,
+    }
+
+
+# ── Preview (inline) ──────────────────────────────────────────────────────────
+@router.get("/documents/{doc_id}/preview")
+async def preview_document(doc_id: str, user=Depends(get_current_user)):
+    doc = await asyncio.to_thread(lambda: DocumentModel.objects(id=doc_id).first())
+    if not doc:
+        raise HTTPException(404, "Document not found")
+
+    file_bytes, content_type = await _load_file(doc)
+    return Response(
+        content=file_bytes,
+        media_type=content_type,
+        headers={"Content-Disposition": f'inline; filename="{doc.filename}"'},
+    )
+
+
+# ── Download ──────────────────────────────────────────────────────────────────
+@router.get("/documents/{doc_id}/download")
+async def download_document(doc_id: str, password: str = None, user=Depends(get_current_user)):
+    doc = await asyncio.to_thread(lambda: DocumentModel.objects(id=doc_id).first())
+    if not doc:
+        raise HTTPException(404, "Document not found")
+
+    file_bytes, content_type = await _load_file(doc)
+
+    # Password-protected PDF unlock
+    if password and doc.filename.lower().endswith(".pdf"):
+        try:
+            import pikepdf
+            import io as _io
+            pdf = pikepdf.open(_io.BytesIO(file_bytes), password=password)
+            buf = _io.BytesIO()
+            pdf.save(buf)
+            file_bytes = buf.getvalue()
+        except pikepdf.PasswordError:
+            raise HTTPException(403, "Incorrect password")
+
+    return Response(
+        content=file_bytes,
+        media_type=content_type,
+        headers={"Content-Disposition": f'attachment; filename="{doc.filename}"'},
+    )
+
+
+async def _load_file(doc) -> tuple:
+    """Load file bytes from GridFS (new) or local disk (legacy)."""
+    # Try GridFS first
+    if doc.file_id:
+        try:
+            file_bytes, content_type = await asyncio.to_thread(
+                gridfs_storage.load, doc.file_id
+            )
+            return file_bytes, content_type
+        except FileNotFoundError:
+            pass
+
+    # Fall back to local disk for old documents
+    if doc.storage_path and os.path.exists(doc.storage_path):
+        with open(doc.storage_path, "rb") as f:
+            return f.read(), doc.content_type or "application/octet-stream"
+
+    raise HTTPException(404, "File not found. It may have been stored on another machine. Migrate to GridFS.")
+
+
+# ── Patch document (routing_status, department, etc.) ─────────────────────────
+@router.patch("/documents/{doc_id}")
+async def patch_document(doc_id: str, body: dict, user=Depends(get_current_user)):
+    doc = await asyncio.to_thread(lambda: DocumentModel.objects(id=doc_id).first())
+    if not doc:
+        raise HTTPException(404, "Document not found")
+
+    old_status = doc.routing_status
+    allowed = {"routing_status", "status", "department", "sensitivity"}
+    for k, v in body.items():
+        if k in allowed:
+            setattr(doc, k, v)
+
+    if "routing_status" in body and body["routing_status"] == "ready":
+        doc.reviewed_at = datetime.utcnow()
+        doc.reviewed_by = str(user["user_id"])
+
+    await asyncio.to_thread(doc.save)
+
+    if "routing_status" in body:
+        _log(doc_id, doc.filename, "reviewed",
+             f"Status changed to '{body['routing_status']}' by user.",
+             agent="human", from_status=old_status,
+             to_status=body["routing_status"], user_id=str(user["user_id"]))
+
+    return {"message": "Updated", "id": doc_id}
+
+
+# ── Audit log for a document ───────────────────────────────────────────────────
+@router.get("/documents/{doc_id}/audit")
+async def get_audit_log(doc_id: str, user=Depends(get_current_user)):
+    logs = await asyncio.to_thread(
+        lambda: list(AuditLogModel.objects(document_id=doc_id).order_by("-timestamp"))
+    )
+    return [
+        {
+            "event":       l.event,
+            "detail":      l.detail,
+            "agent":       l.agent,
+            "from_status": l.from_status,
+            "to_status":   l.to_status,
+            "user_id":     l.user_id,
+            "metadata":    l.metadata,
+            "timestamp":   l.timestamp,
+        }
+        for l in logs
+    ]
+
+
+# ── Delete document ────────────────────────────────────────────────────────────
+@router.delete("/documents/{doc_id}")
+async def delete_document(doc_id: str, user=Depends(get_current_user)):
+    doc = await asyncio.to_thread(lambda: DocumentModel.objects(id=doc_id).first())
+    if not doc:
+        raise HTTPException(404, "Document not found")
+    if user["role"].lower() != "admin" and str(doc.user_id) != str(user["user_id"]):
+        raise HTTPException(403, "Access denied")
+
+    # Delete from GridFS too
+    if doc.file_id:
+        try:
+            await asyncio.to_thread(gridfs_storage.delete, doc.file_id)
+        except Exception:
+            pass
+
+    await asyncio.to_thread(doc.delete)
+    return {"message": "Document deleted"}
+
+
+# ── Email credential management ────────────────────────────────────────────────
 from pydantic import BaseModel
 
 class EmailCredentialSchema(BaseModel):
-    imap_host: str = "imap.gmail.com"
-    imap_port: int = 993
-    email_address: str
+    imap_host:      str = "imap.gmail.com"
+    imap_port:      int = 993
+    email_address:  str
     email_password: str
 
 
 @router.post("/email/connect")
 async def connect_email(data: EmailCredentialSchema, user=Depends(get_current_user)):
+    # Test connection first
     try:
         mail = imaplib.IMAP4_SSL(data.imap_host, data.imap_port)
         mail.login(data.email_address, data.email_password)
         mail.logout()
     except imaplib.IMAP4.error as e:
-        raise HTTPException(status_code=400, detail=f"Invalid email credentials: {str(e)}")
+        raise HTTPException(400, f"Invalid email credentials: {e}")
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Could not connect to mail server: {str(e)}")
+        raise HTTPException(400, f"Could not connect to mail server: {e}")
 
-    cred = EmailCredentialModel.objects(user_id=str(user["user_id"])).first()
+    cred = await asyncio.to_thread(
+        lambda: EmailCredentialModel.objects(user_id=str(user["user_id"])).first()
+    )
     if cred:
-        cred.imap_host = data.imap_host
-        cred.imap_port = data.imap_port
-        cred.email_address = data.email_address
-        cred.email_password = data.email_password
-        cred.is_active = True
-        cred.connected_at = datetime.utcnow()
+        cred.imap_host = data.imap_host; cred.imap_port = data.imap_port
+        cred.email_address = data.email_address; cred.email_password = data.email_password
+        cred.is_active = True; cred.connected_at = datetime.utcnow()
     else:
         cred = EmailCredentialModel(
-            user_id=str(user["user_id"]),
-            imap_host=data.imap_host,
-            imap_port=data.imap_port,
-            email_address=data.email_address,
+            user_id=str(user["user_id"]), imap_host=data.imap_host,
+            imap_port=data.imap_port, email_address=data.email_address,
             email_password=data.email_password,
         )
-    cred.save()
-    return {"message": "Email connected successfully", "email": data.email_address}
+    await asyncio.to_thread(cred.save)
+    return {"message": "Email connected", "email": data.email_address}
 
 
 @router.get("/email/status")
@@ -173,11 +340,9 @@ async def email_status(user=Depends(get_current_user)):
     )
     if not cred:
         return {"connected": False}
-    return {
-        "connected": cred.is_active,
-        "email": cred.email_address,
-        "last_synced_at": cred.last_synced_at,
-    }
+    return {"connected": cred.is_active, "email": cred.email_address,
+            "imap_host": cred.imap_host, "imap_port": cred.imap_port,
+            "last_synced_at": cred.last_synced_at}
 
 
 @router.delete("/email/disconnect")
@@ -186,20 +351,32 @@ async def disconnect_email(user=Depends(get_current_user)):
         lambda: EmailCredentialModel.objects(user_id=str(user["user_id"])).first()
     )
     if not cred:
-        raise HTTPException(status_code=404, detail="No email connected")
+        raise HTTPException(404, "No email connected")
     cred.is_active = False
     await asyncio.to_thread(cred.save)
     return {"message": "Email disconnected"}
 
 
-# -------------------------
-# Email body extraction helper
-# -------------------------
-def _extract_email_body(msg) -> str:
-    """Extract plain text body from an email message, falling back to stripped HTML."""
-    plain_parts = []
-    html_parts = []
+# ── Email ingestion trigger ────────────────────────────────────────────────────
+@router.post("/documents/ingest-email")
+def ingest_email(background_tasks: BackgroundTasks, user=Depends(get_current_user)):
+    cred = EmailCredentialModel.objects(user_id=str(user["user_id"]), is_active=True).first()
+    if not cred:
+        raise HTTPException(400, "No email inbox connected.")
+    background_tasks.add_task(fetch_email_attachments_for_user, str(user["user_id"]), cred)
+    return {"message": f"Email ingestion started for {cred.email_address}"}
 
+
+def _decode_header_str(raw) -> str:
+    parts = decode_header(raw or "")
+    return "".join(
+        p.decode(enc or "utf-8") if isinstance(p, bytes) else p
+        for p, enc in parts
+    )
+
+
+def _extract_email_body(msg) -> str:
+    plain, html = [], []
     for part in msg.walk():
         ct = part.get_content_type()
         if part.get_content_maintype() == "multipart":
@@ -207,153 +384,103 @@ def _extract_email_body(msg) -> str:
         try:
             if ct == "text/plain":
                 payload = part.get_payload(decode=True)
-                if payload:
-                    plain_parts.append(payload.decode(errors="ignore"))
+                if payload: plain.append(payload.decode(errors="ignore"))
             elif ct == "text/html":
                 payload = part.get_payload(decode=True)
                 if payload:
                     from bs4 import BeautifulSoup
-                    html_parts.append(
-                        BeautifulSoup(payload.decode(errors="ignore"), "html.parser").get_text(separator=" ")
-                    )
+                    html.append(BeautifulSoup(payload.decode(errors="ignore"), "html.parser").get_text(" "))
         except Exception:
             pass
-
-    body = " ".join(plain_parts) if plain_parts else " ".join(html_parts)
-    # Trim to 2000 chars — enough context without bloating the LLM prompt
-    return body.strip()[:2000]
+    return (" ".join(plain) if plain else " ".join(html)).strip()[:2000]
 
 
-# -------------------------
-# Per-user email ingestion
-# -------------------------
 def fetch_email_attachments_for_user(user_id: str, cred: EmailCredentialModel):
+    """
+    Fetches UNSEEN emails that have attachments.
+    CRITICAL: Only marks an email as Seen if at least one attachment was ingested.
+    Conversation-only emails are never touched — they stay unread.
+    """
     try:
         mail = imaplib.IMAP4_SSL(cred.imap_host, cred.imap_port)
         mail.login(cred.email_address, cred.email_password)
+        mail.select("INBOX")
 
-        typ, folders = mail.list()
-        if typ != "OK":
-            print(f"[ERROR] Failed to list folders for user {user_id}")
-            return
+        # Gmail: use server-side filter to pre-select only emails with attachments
+        status, att_ids = mail.search(None, "UNSEEN", "X-GM-RAW", "has:attachment")
+        if status != "OK" or not att_ids[0]:
+            # Non-Gmail fallback: fetch all UNSEEN, filter at parse time
+            status, att_ids = mail.search(None, "UNSEEN")
+            if status != "OK" or not att_ids[0]:
+                mail.logout()
+                return
 
-        folders = [f.decode().split(' "/" ')[1].strip('"') for f in folders]
-        ingested_email_ids = set()
-
-        for folder in folders:
+        for msg_id in att_ids[0].split():
             try:
-                typ, _ = mail.select(folder)
-                if typ != "OK":
-                    continue
-            except Exception:
-                continue
+                # Peek at headers only first — does NOT change read/unread status
+                _, hdr_data = mail.fetch(msg_id, "(BODY.PEEK[HEADER.FIELDS (SUBJECT FROM CONTENT-TYPE)])")
+                hdr_text = hdr_data[0][1].decode(errors="replace") if hdr_data and hdr_data[0] else ""
 
-            typ, data = mail.search(None, "UNSEEN")
-            if typ != "OK":
-                continue
-
-            for num in data[0].split():
-                if num in ingested_email_ids:
+                # Skip non-multipart emails — they cannot have file attachments
+                # Email stays UNREAD — sender/recipient won't miss it
+                if "multipart" not in hdr_text.lower():
                     continue
-                try:
-                    typ, msg_data = mail.fetch(num, "(RFC822)")
-                    if typ != "OK":
+
+                # Full fetch only for multipart emails
+                _, msg_data = mail.fetch(msg_id, "(RFC822)")
+                msg = email.message_from_bytes(msg_data[0][1], policy=policy.default)
+
+                subject = _decode_header_str(msg.get("Subject", "No Subject"))
+                sender  = msg.get("from", "Unknown")
+                body    = _extract_email_body(msg)
+
+                email_context = {"subject": subject, "from": sender, "body": body}
+                ingested_this_email = 0
+
+                for part in msg.walk():
+                    if part.get_content_maintype() == "multipart":
+                        continue
+                    if "attachment" not in (part.get("Content-Disposition") or ""):
+                        continue
+                    raw_fname = part.get_filename()
+                    if not raw_fname:
+                        continue
+                    filename = _decode_header_str(raw_fname)
+                    ext = ("." + filename.rsplit(".", 1)[-1].lower()) if "." in filename else ""
+                    if ext not in SUPPORTED_EXTS:
                         continue
 
-                    for response_part in msg_data:
-                        if not isinstance(response_part, tuple):
-                            continue
+                    file_bytes_data = part.get_payload(decode=True)
+                    if not file_bytes_data:
+                        continue
 
-                        msg = email.message_from_bytes(response_part[1], policy=policy.default)
-                        subject = msg["subject"] or "No Subject"
-                        sender  = msg["from"] or "Unknown Sender"
+                    try:
+                        ingest_bytes(
+                            file_bytes    = file_bytes_data,
+                            filename      = filename,
+                            user_id       = user_id,
+                            purpose       = f"Email: {subject}",
+                            content_type  = part.get_content_type(),
+                            source        = "email",
+                            email_context = email_context,
+                        )
+                        ingested_this_email += 1
+                    except Exception as e:
+                        # Duplicate or processing error — don't mark Seen, don't crash
+                        print(f"[EMAIL] Skipped {filename}: {e}")
 
-                        # ── Extract email body for context-aware routing ──
-                        body = _extract_email_body(msg)
+                # ── ONLY mark as Seen if we ingested at least one attachment ──
+                # Conversation emails, unsupported-extension-only emails → stay UNREAD
+                if ingested_this_email > 0:
+                    mail.store(msg_id, "+FLAGS", "\\Seen")
 
-                        email_context = {
-                            "subject": subject,
-                            "from":    sender,
-                            "body":    body,
-                        }
-
-                        for part in msg.walk():
-                            if part.get_content_maintype() == "multipart":
-                                continue
-                            if part.get("Content-Disposition") is None:
-                                continue
-
-                            filename = part.get_filename()
-                            if filename:
-                                file_bytes = part.get_payload(decode=True)
-                                ingest_bytes(
-                                    file_bytes=file_bytes,
-                                    filename=filename,
-                                    user_id=user_id,
-                                    purpose=f"Email: {subject}",
-                                    content_type=part.get_content_type(),
-                                    source="email",
-                                    email_context=email_context,  # ← passed through
-                                )
-
-                    mail.store(num, "+FLAGS", "\\Seen")
-                    ingested_email_ids.add(num)
-
-                except Exception as e:
-                    print(f"[ERROR] Failed processing email {num} for user {user_id}: {e}")
-                    continue
+            except Exception as e:
+                print(f"[EMAIL] Error processing msg {msg_id}: {e}")
+                continue
 
         cred.last_synced_at = datetime.utcnow()
         cred.save()
         mail.logout()
-        print(f"[INFO] Email sync completed for user {user_id} ({cred.email_address})")
 
     except Exception as e:
-        print(f"[ERROR] Email ingestion failed for user {user_id}: {e}")
-
-
-# -------------------------
-# Download / View file
-# -------------------------
-@router.get("/documents/{document_id}/file")
-async def get_document_file(document_id: str, user=Depends(get_current_user)):
-    if not ObjectId.is_valid(document_id):
-        raise HTTPException(status_code=400, detail="Invalid document ID")
-
-    doc = await asyncio.to_thread(
-        lambda: DocumentModel.objects(id=document_id).first()
-    )
-    if not doc:
-        raise HTTPException(status_code=404, detail="Document not found")
-
-    if user["role"].lower() != "admin" and str(doc.user_id) != str(user["user_id"]):
-        raise HTTPException(status_code=403, detail="Access denied")
-
-    file_path = os.path.abspath(doc.storage_path)
-    if not os.path.exists(file_path):
-        raise HTTPException(status_code=404, detail="File not found on disk")
-
-    return FileResponse(
-        path=file_path,
-        media_type=doc.content_type or "application/octet-stream",
-        filename=doc.filename,
-        headers={
-            "Content-Disposition": f'inline; filename="{doc.filename}"',
-            "Accept-Ranges": "bytes",
-        },
-    )
-
-
-# -------------------------
-# Delete Document
-# -------------------------
-@router.delete("/documents/{document_id}")
-async def delete_document(document_id: str, user_id: str = Depends(get_current_user_id)):
-    document = await asyncio.to_thread(
-        lambda: DocumentModel.objects(id=document_id, user_id=str(user_id)).first()
-    )
-    if not document:
-        raise HTTPException(status_code=404, detail="Document not found")
-
-    await asyncio.to_thread(document.delete)
-    return {"message": "Document deleted successfully"}
+        print(f"[EMAIL] Sync failed for user {user_id}: {e}")

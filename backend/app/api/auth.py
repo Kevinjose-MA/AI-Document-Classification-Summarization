@@ -202,3 +202,66 @@ def delete_user(user_id: str, admin=Depends(require_admin)):
         raise HTTPException(status_code=404, detail="User not found")
     user.delete()
     return {"message": "User deleted"}
+
+
+    # ── Add these to app/api/auth.py ─────────────────────────────
+# These two endpoints handle saving and retrieving email credentials.
+# The password is stored as-is here. In production, encrypt with Fernet.
+
+from app.models.models import EmailCredentialModel  # already in your models.py
+
+class EmailCredentialSchema(BaseModel):
+    imap_host:      str  = "imap.gmail.com"
+    imap_port:      int  = 993
+    email_address:  str
+    email_password: str  # app password / oauth token
+
+
+@router.post("/auth/email-credentials")
+def save_email_credentials(
+    data: EmailCredentialSchema,
+    user: dict = Depends(get_current_user),
+):
+    """Save or update IMAP credentials for the current user."""
+    user_id = str(user["user_id"])
+
+    # Upsert — one inbox per user
+    cred = EmailCredentialModel.objects(user_id=user_id).first()
+    if cred:
+        cred.imap_host      = data.imap_host
+        cred.imap_port      = data.imap_port
+        cred.email_address  = data.email_address
+        cred.email_password = data.email_password
+        cred.is_active      = True
+    else:
+        cred = EmailCredentialModel(
+            user_id        = user_id,
+            imap_host      = data.imap_host,
+            imap_port      = data.imap_port,
+            email_address  = data.email_address,
+            email_password = data.email_password,
+            is_active      = True,
+        )
+    cred.save()
+    return {
+        "message":       "Credentials saved",
+        "email_address": cred.email_address,
+        "imap_host":     cred.imap_host,
+        "imap_port":     cred.imap_port,
+    }
+
+
+@router.get("/auth/email-credentials")
+def get_email_credentials(user: dict = Depends(get_current_user)):
+    """Get current user's email credentials (password never returned)."""
+    user_id = str(user["user_id"])
+    cred = EmailCredentialModel.objects(user_id=user_id).first()
+    if not cred:
+        raise HTTPException(status_code=404, detail="No email credentials configured")
+    return {
+        "email_address": cred.email_address,
+        "imap_host":     cred.imap_host,
+        "imap_port":     cred.imap_port,
+        "is_active":     cred.is_active,
+        "last_synced_at": cred.last_synced_at.isoformat() if cred.last_synced_at else None,
+    }
