@@ -53,25 +53,10 @@ export default function Login() {
             <h2 className="text-white text-[28px] font-bold leading-tight tracking-tight">
               AI Document<br />Intelligence Platform
             </h2>
-            <p className="text-white/40 text-[13px] mt-3 leading-relaxed font-mono">
-              Intelligent ingestion, classification, and routing for Kochi Metro Rail Limited.
-            </p>
+    
           </div>
 
-          <div className="space-y-3.5">
-            {[
-              ["◈", "OCR + structured content extraction"],
-              ["◈", "Gemini AI summarization pipeline"],
-              ["◈", "Multilingual document support"],
-              ["◈", "Role-based department access control"],
-              ["◈", "Multi-source ingestion (email, manual)"],
-            ].map(([icon, f]) => (
-              <div key={f} className="flex items-center gap-3 text-[13px] text-white/50">
-                <span className="text-[#00C2D4] text-[10px] shrink-0">{icon}</span>
-                {f}
-              </div>
-            ))}
-          </div>
+      
         </div>
 
         <div className="space-y-2">

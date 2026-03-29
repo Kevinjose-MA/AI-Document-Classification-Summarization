@@ -74,9 +74,11 @@ if os.path.exists(QA_CACHE_FILE):
             print("⚠ QA cache corrupted. Starting fresh.")
             qa_cache = {}
 
+
 class HackRxRequest(BaseModel):
     documents: Union[str, List[str]]
     questions: List[str]
+
 
 logging.basicConfig(
     level=logging.INFO,
@@ -87,65 +89,9 @@ logger = logging.getLogger(__name__)
 
 def format_hackrx_answer(answer_type: str, value: str) -> str:
     formats = {
-        "flight_number": f"The flight number is {value}",
         "secret_token": f"Your secret token is {value}"
     }
     return formats.get(answer_type, value)
-
-
-def get_flight_number_from_document():
-    try:
-        fav_city_url = "https://register.hackrx.in/submissions/myFavouriteCity"
-        resp = requests.get(fav_city_url, timeout=10)
-        resp.raise_for_status()
-        city_data = resp.json()
-        city_name = city_data.get("city") or city_data.get("data") or city_data
-        if isinstance(city_name, dict):
-            city_name = city_name.get("city", "").strip()
-        else:
-            city_name = str(city_name).strip()
-
-        print(f"🛬 Favourite city: {city_name}")
-
-        city_to_landmark = {
-            "Delhi": "Gateway of India",
-            "Mumbai": "India Gate",
-            "Chennai": "Charminar",
-            "Hyderabad": "Marina Beach",
-            "Paris": "Taj Mahal",
-            "New York": "Eiffel Tower",
-            "London": "Big Ben",
-        }
-
-        landmark = city_to_landmark.get(city_name)
-        if not landmark:
-            print("❌ No landmark mapping found for city.")
-            return None
-
-        base_url = "https://register.hackrx.in/teams/public/flights/"
-        if landmark == "Gateway of India":
-            flight_url = base_url + "getFirstCityFlightNumber"
-        elif landmark == "Taj Mahal":
-            flight_url = base_url + "getSecondCityFlightNumber"
-        elif landmark == "Eiffel Tower":
-            flight_url = base_url + "getThirdCityFlightNumber"
-        elif landmark == "Big Ben":
-            flight_url = base_url + "getFourthCityFlightNumber"
-        else:
-            flight_url = base_url + "getFifthCityFlightNumber"
-
-        resp2 = requests.get(flight_url, timeout=10)
-        resp2.raise_for_status()
-        flight_data = resp2.json()
-        flight_number = (flight_data.get("flightNumber")
-                         or flight_data.get("data", {}).get("flightNumber"))
-        if not flight_number:
-            return None
-
-        return str(flight_number)
-    except Exception as e:
-        print(f"❌ Error fetching flight number: {e}")
-        return None
 
 
 def is_document_url(url: str) -> bool:
@@ -187,21 +133,17 @@ def handle_dynamic_get_requests(answer_text: str) -> str:
                         data = resp.json()
                         if isinstance(data, dict):
                             if "data" in data and isinstance(data["data"], dict):
-                                for key in ["flightNumber", "token", "secret", "city"]:
+                                for key in ["token", "secret", "city"]:
                                     if key in data["data"]:
-                                        if key == "flightNumber":
-                                            return format_hackrx_answer("flight_number", str(data["data"][key]).strip())
-                                        elif key in ["token", "secret"]:
+                                        if key in ["token", "secret"]:
                                             return format_hackrx_answer("secret_token", str(data["data"][key]).strip())
                                         return str(data["data"][key]).strip()
-                            for key in ["flightNumber", "token", "secret", "city"]:
+                            for key in ["token", "secret", "city"]:
                                 if key in data:
-                                    if key == "flightNumber":
-                                        return format_hackrx_answer("flight_number", str(data[key]).strip())
-                                    elif key in ["token", "secret"]:
+                                    if key in ["token", "secret"]:
                                         return format_hackrx_answer("secret_token", str(data[key]).strip())
                                     return str(data[key]).strip()
-                        value = find_key_recursive(data, ["flightNumber", "token", "secret", "city"])
+                        value = find_key_recursive(data, ["token", "secret", "city"])
                         if value is not None:
                             return str(value).strip()
                         return json.dumps(data, ensure_ascii=False)
@@ -516,9 +458,9 @@ async def hackrx_run(req: HackRxRequest):
 
     doc_urls = req.documents if isinstance(req.documents, list) else [req.documents]
     all_clauses = []
-    flight_number_result = None
     secret_token_result = None
 
+    # ── Pass 1: load document clauses from cache or extract ──────────────────
     for url in doc_urls:
         try:
             if is_document_url(url):
@@ -527,7 +469,7 @@ async def hackrx_run(req: HackRxRequest):
                     with open(cache_path, "r", encoding="utf-8") as f:
                         clauses = json.load(f)
                 else:
-                    clauses = extract_clauses_from_url(url)
+                    clauses = extract_clauses(url)
                     if clauses:
                         save_clause_cache(url, clauses)
                     else:
@@ -536,11 +478,7 @@ async def hackrx_run(req: HackRxRequest):
         except Exception as e:
             print(f"❌ Failed to process {url}: {e}")
 
-    if any("myFavouriteCity" in clause.get("clause", "") for clause in all_clauses):
-        flight_number = get_flight_number_from_document()
-        if flight_number:
-            return {"answers": [format_hackrx_answer("flight_number", flight_number)]}
-
+    # ── Check for embedded hackrx.in API URLs inside clauses ─────────────────
     for clause_obj in all_clauses:
         urls = re.findall(r"https?://\S+", clause_obj.get("clause", ""))
         for u in urls:
@@ -554,22 +492,21 @@ async def hackrx_run(req: HackRxRequest):
                             data = None
                         if isinstance(data, dict):
                             if "data" in data and isinstance(data["data"], dict):
-                                if "flightNumber" in data["data"]:
-                                    flight_number_result = str(data["data"]["flightNumber"]).strip()
-                                elif "token" in data["data"] or "secret" in data["data"]:
-                                    secret_token_result = str(data["data"].get("token") or data["data"].get("secret")).strip()
-                            if "flightNumber" in data:
-                                flight_number_result = str(data["flightNumber"]).strip()
-                            elif "token" in data or "secret" in data:
-                                secret_token_result = str(data.get("token") or data.get("secret")).strip()
+                                if "token" in data["data"] or "secret" in data["data"]:
+                                    secret_token_result = str(
+                                        data["data"].get("token") or data["data"].get("secret")
+                                    ).strip()
+                            if "token" in data or "secret" in data:
+                                secret_token_result = str(
+                                    data.get("token") or data.get("secret")
+                                ).strip()
                 except Exception as e:
                     print(f"❌ Failed API fetch for clause URL {u}: {e}")
 
-    if flight_number_result:
-        return {"answers": [format_hackrx_answer("flight_number", flight_number_result)]}
     if secret_token_result:
         return {"answers": [format_hackrx_answer("secret_token", secret_token_result)]}
 
+    # ── Handle whitelisted non-document URLs directly ─────────────────────────
     whitelist = ["hackrx.in", "example.com"]
     for url in doc_urls:
         if any(domain in url for domain in whitelist) and not is_document_url(url):
@@ -580,14 +517,11 @@ async def hackrx_run(req: HackRxRequest):
                     if "application/json" in content_type:
                         try:
                             data = resp.json()
-                            if "data" in data and isinstance(data["data"], dict) and "flightNumber" in data["data"]:
-                                return {"answers": [format_hackrx_answer("flight_number", str(data["data"]["flightNumber"]))]}
-                            else:
-                                for key in ["flightNumber", "token", "secret"]:
-                                    if key in data:
-                                        return {"answers": [format_hackrx_answer(
-                                            "flight_number" if key == "flightNumber" else "secret_token", str(data[key])
-                                        )]}
+                            for key in ["token", "secret"]:
+                                if "data" in data and isinstance(data["data"], dict) and key in data["data"]:
+                                    return {"answers": [format_hackrx_answer("secret_token", str(data["data"][key]))]}
+                                if key in data:
+                                    return {"answers": [format_hackrx_answer("secret_token", str(data[key]))]}
                         except Exception:
                             pass
                     elif "text/html" in content_type:
@@ -603,6 +537,7 @@ async def hackrx_run(req: HackRxRequest):
                 print(f"❌ Error fetching {url}: {e}")
             return {"answers": ["Failed to fetch content from non-document URL."]}
 
+    # ── Pass 2: full clause extraction (including non-document URLs) ──────────
     for url in doc_urls:
         try:
             if not is_document_url(url):
@@ -620,7 +555,7 @@ async def hackrx_run(req: HackRxRequest):
                 with open(cache_path, "r", encoding="utf-8") as f:
                     clauses = json.load(f)
             else:
-                clauses = extract_clauses_from_url(url)
+                clauses = extract_clauses(url)
                 if clauses:
                     save_clause_cache(url, clauses)
                 else:
@@ -632,6 +567,7 @@ async def hackrx_run(req: HackRxRequest):
     if not all_clauses:
         return {"answers": ["No valid clauses found in provided documents."] * len(req.questions)}
 
+    # ── Check hackrx.in URLs embedded in clause text ─────────────────────────
     whitelist = ["hackrx.in"]
     for clause_obj in all_clauses:
         clause_text = clause_obj.get("clause", "")
@@ -643,11 +579,11 @@ async def hackrx_run(req: HackRxRequest):
                     if resp.status_code == 200:
                         try:
                             data = resp.json()
-                            for key in ["flightNumber", "token", "secret", "city"]:
+                            for key in ["token", "secret", "city"]:
                                 if key in data:
                                     return {"answers": [str(data[key]).strip()]}
                             if "data" in data and isinstance(data["data"], dict):
-                                for key in ["flightNumber", "token", "secret", "city"]:
+                                for key in ["token", "secret", "city"]:
                                     if key in data["data"]:
                                         return {"answers": [str(data["data"][key]).strip()]}
                             return {"answers": [json.dumps(data, ensure_ascii=False)]}
@@ -656,6 +592,7 @@ async def hackrx_run(req: HackRxRequest):
                 except Exception as e:
                     print(f"❌ Error fetching direct API from clause: {e}")
 
+    # ── Build / load FAISS index ──────────────────────────────────────────────
     dynamic_keyword_map = extract_dynamic_keywords_from_clauses(all_clauses)
 
     url0_hash = url_hash(doc_urls[0])
@@ -668,6 +605,7 @@ async def hackrx_run(req: HackRxRequest):
         index, _ = build_faiss_index(valid_clauses)
         app.state.cache_indices[url0_hash] = {"index": index, "clauses": valid_clauses}
 
+    # ── Question splitting + cache lookup ─────────────────────────────────────
     split_questions = []
     original_map = {}
     for q in req.questions:
@@ -683,6 +621,7 @@ async def hackrx_run(req: HackRxRequest):
         best_sentence = extract_best_sentence(q, question_clause_map.get(q, []))
         qa_cache[q] = best_sentence if best_sentence else "No matching clause found"
 
+    # ── Batch LLM calls ───────────────────────────────────────────────────────
     batch_size = 15
     batches = [list(question_clause_map.items())[i:i + batch_size] for i in range(0, len(uncached_questions), batch_size)]
     prompts = [build_prompt_batch(dict(batch)) for batch in batches]
@@ -700,6 +639,7 @@ async def hackrx_run(req: HackRxRequest):
     with open(QA_CACHE_FILE, "w", encoding="utf-8") as f:
         json.dump(qa_cache, f, indent=2, ensure_ascii=False)
 
+    # ── Assemble final answers ────────────────────────────────────────────────
     answers_map = {}
     for sq, orig_q in original_map.items():
         answers_map.setdefault(orig_q, []).append(qa_cache.get(sq, "No answer found."))
@@ -717,11 +657,11 @@ async def hackrx_run(req: HackRxRequest):
     return {"answers": processed_final_answers}
 
 
-# -------------------------
-# Startup — FAISS warmup only
+# ─────────────────────────────────────────────────────────────────────────────
+# Startup — FAISS warmup only.
 # Email ingestion is NOT run at startup.
 # Each user triggers their own sync via POST /api/v1/documents/ingest-email
-# -------------------------
+# ─────────────────────────────────────────────────────────────────────────────
 @app.on_event("startup")
 async def warmup_model():
     logger.info("[INGEST] Application startup triggered")
@@ -778,9 +718,12 @@ async def warmup_model():
 
         logger.info(f"[INGEST] FAISS index loaded | source=cache | file={filename} | clauses={len(clause_texts)}")
 
-    # ── Auto-connect admin inbox from .env if not already saved ─────────────
+    # ── Auto-connect admin inbox from .env if not already saved ──────────────
     from app.models.models import EmailCredentialModel, UserModel
     from app.core.config import EMAIL_USER, EMAIL_PASS
+
+    admin = None
+    cred = None
 
     if EMAIL_USER and EMAIL_PASS:
         try:
@@ -806,11 +749,11 @@ async def warmup_model():
 
     logger.info("[INGEST] Startup warmup completed")
 
-    # Auto-trigger ingestion on startup for admin
-    from app.api.documents import fetch_email_attachments_for_user
-    import threading
-
+    # ── Auto-trigger ingestion on startup for admin ───────────────────────────
     if admin and cred:
+        from app.api.documents import fetch_email_attachments_for_user
+        import threading
+
         thread = threading.Thread(
             target=fetch_email_attachments_for_user,
             args=(str(admin.id), cred),
