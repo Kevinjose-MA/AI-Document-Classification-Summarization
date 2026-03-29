@@ -34,6 +34,10 @@ from app.core.config import init_db
 from app.api.auth import router as auth_router
 from app.models.models import DocumentModel
 
+from apscheduler.schedulers.background import BackgroundScheduler
+from app.services.escalation import run_escalation_check
+ 
+
 # Initialize MongoDB
 init_db()
 
@@ -78,6 +82,8 @@ if os.path.exists(QA_CACHE_FILE):
 class HackRxRequest(BaseModel):
     documents: Union[str, List[str]]
     questions: List[str]
+    
+scheduler = BackgroundScheduler(timezone="UTC")
 
 
 logging.basicConfig(
@@ -750,6 +756,7 @@ async def warmup_model():
     logger.info("[INGEST] Startup warmup completed")
 
     # ── Auto-trigger ingestion on startup for admin ───────────────────────────
+    
     if admin and cred:
         from app.api.documents import fetch_email_attachments_for_user
         import threading
@@ -762,6 +769,25 @@ async def warmup_model():
         thread.start()
         logger.info(f"[INGEST] Startup email ingestion triggered for {cred.email_address}")
 
+        #Audit Logging
+        scheduler.add_job(
+        run_escalation_check,
+        trigger="interval",
+        minutes=30,
+        id="escalation_check",
+        replace_existing=True,
+        max_instances=1,        # never run two simultaneously
+    )
+    scheduler.start()
+    import logging
+    logging.getLogger("ESCALATION").info(
+        "Escalation scheduler started — checking every 30 minutes. "
+        f"SLA thresholds: high=2h, medium=24h, low=72h"
+    )
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    scheduler.shutdown(wait=False)
 
 @app.get("/api/v1/documents/{file_id}/preview")
 def preview_document(file_id: str):

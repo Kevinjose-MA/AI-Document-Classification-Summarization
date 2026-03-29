@@ -53,6 +53,11 @@ const ADMIN_NAV = [
       </svg>
     ),
   },
+  {
+    path: "/audit-log",
+    label: "Audit Log",
+    icon: "📋",
+  },
 ];
 
 const BOTTOM_NAV = [

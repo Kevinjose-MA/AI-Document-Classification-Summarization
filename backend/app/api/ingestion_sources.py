@@ -30,11 +30,33 @@ def _check_dept_access(user: dict, department: str):
 
 # ── LIST ──────────────────────────────────────────────────
 def _do_list_sources(user: dict):
-    if user.get("role") == "admin":
-        sources = IngestionSourceModel.objects().order_by("-created_at")
+    user_id = str(user.get("user_id", ""))
+    role    = user.get("role", "").lower()
+
+    if role == "admin":
+        # Admin sees all NON-email sources org-wide.
+        # Email sources are personal — admin cannot see other users' inboxes.
+        non_email = list(IngestionSourceModel.objects(
+            type__ne=SourceType.EMAIL
+        ).order_by("-created_at"))
+        # Admin can still see their OWN email source if they have one
+        own_email = list(IngestionSourceModel.objects(
+            type=SourceType.EMAIL,
+            created_by=user_id,
+        ).order_by("-created_at"))
+        sources = own_email + non_email
     else:
-        dept = user.get("role", "").lower()
-        sources = IngestionSourceModel.objects(department=dept).order_by("-created_at")
+        # Dept users see their dept's non-email sources + their own email source
+        dept_sources = list(IngestionSourceModel.objects(
+            department=role,
+            type__ne=SourceType.EMAIL,
+        ).order_by("-created_at"))
+        own_email = list(IngestionSourceModel.objects(
+            type=SourceType.EMAIL,
+            created_by=user_id,
+        ).order_by("-created_at"))
+        sources = own_email + dept_sources
+
     return [s.to_dict() for s in sources]
 
 @router.get("/")
@@ -86,9 +108,15 @@ async def delete_source(source_id: str, user: dict = Depends(get_current_user)):
         raise HTTPException(404, "Source not found")
     _check_dept_access(user, src.department)
 
-    # Cascade: if this was an email source, deactivate + delete its credentials
+    # SECURITY: Only the creator of an email source can delete it.
+    # Admin cannot delete another user's email source.
     if src.type == SourceType.EMAIL:
         user_id = str(user.get("user_id", ""))
+        if src.created_by != user_id:
+            raise HTTPException(
+                403,
+                "Access denied. You can only delete your own email ingestion source."
+            )
         await asyncio.to_thread(_delete_email_credentials, user_id)
 
     await asyncio.to_thread(src.delete)
@@ -194,28 +222,36 @@ async def trigger_sync(source_id: str, user: dict = Depends(get_current_user)):
     _check_dept_access(user, src.department)
 
     if src.type == SourceType.EMAIL:
-        # Verify source is still active (not soft-deleted or disabled)
+        user_id = str(user.get("user_id", ""))
+
+        # SECURITY: Only the user who created this email source can sync it.
+        # No one else — including admin — can trigger another user's email sync.
+        if src.created_by != user_id:
+            raise HTTPException(
+                403,
+                "Access denied. You can only sync your own email ingestion source."
+            )
+
+        # Verify source is still active
         if src.status == SourceStatus.DISABLED:
             raise HTTPException(400, "This ingestion source is disabled.")
 
-        # Fetch stored credentials for this user
+        # Fetch credentials — must belong to the same user
         from app.models.models import EmailCredentialModel
-        user_id = str(user.get("user_id", ""))
         cred = await asyncio.to_thread(
             lambda: EmailCredentialModel.objects(user_id=user_id, is_active=True).first()
         )
         if not cred:
             raise HTTPException(400, "No email credentials configured. Add IMAP credentials first.")
 
-        # Double-check: credentials must belong to an active source
+        # Verify credentials are still linked to an active source
         active_email_source = await asyncio.to_thread(
             lambda: IngestionSourceModel.objects(
                 type=SourceType.EMAIL,
-                department=src.department,
+                created_by=user_id,
             ).first()
         )
         if not active_email_source:
-            # Source was deleted but cred still exists — clean up and block
             await asyncio.to_thread(_delete_email_credentials, user_id)
             raise HTTPException(400, "Email source no longer exists. Please re-add it.")
 
@@ -252,8 +288,12 @@ def _run_imap_sync(cred, user_id: str, src) -> int:
     if not cred.is_active:
         return 0
 
+    # Decrypt password before use — stored encrypted in MongoDB
+    from app.core.encryption import decrypt_password, is_encrypted
+    imap_password = decrypt_password(cred.email_password) if is_encrypted(cred.email_password) else cred.email_password
+
     mail = imaplib.IMAP4_SSL(cred.imap_host, cred.imap_port)
-    mail.login(cred.email_address, cred.email_password)
+    mail.login(cred.email_address, imap_password)
     mail.select("INBOX")
 
     status, message_ids = mail.search(None, "UNSEEN")
@@ -261,10 +301,31 @@ def _run_imap_sync(cred, user_id: str, src) -> int:
         mail.logout()
         return 0
 
-    for msg_id in message_ids[0].split():
+    # Use IMAP SEARCH to pre-filter — only fetch emails that have attachments.
+    # X-GM-RAW is Gmail-specific and most reliable; fall back to generic search.
+    # This means pure conversation emails are never fetched or touched at all.
+    status2, att_ids = mail.search(None, "UNSEEN", "X-GM-RAW", "has:attachment")
+    if status2 != "OK" or not att_ids[0]:
+        # Gmail X-GM-RAW not supported (non-Gmail IMAP) — fall back: fetch all
+        # UNSEEN but skip at parse time if no attachments found (don't mark Seen)
+        att_ids = message_ids
+
+    for msg_id in att_ids[0].split():
         try:
+            # Peek at headers only first — avoids downloading full email body
+            # if there are no attachments at all (cheap pre-check)
+            _, hdr_data = mail.fetch(msg_id, "(BODY.PEEK[HEADER.FIELDS (SUBJECT FROM CONTENT-TYPE)])")
+            hdr_text = hdr_data[0][1].decode(errors="replace") if hdr_data and hdr_data[0] else ""
+
+            # Quick pre-filter: if "multipart" not in headers, this email has no attachments
+            # Skip entirely — do NOT mark as Seen, do NOT download body
+            if "multipart" not in hdr_text.lower():
+                continue
+
+            # Full fetch only for multipart emails
             _, msg_data = mail.fetch(msg_id, "(RFC822)")
             msg = email_lib.message_from_bytes(msg_data[0][1])
+
             raw_subj = msg.get("Subject", "Email attachment")
             subject = "".join(
                 p.decode(enc or "utf-8") if isinstance(p, bytes) else p
@@ -272,8 +333,13 @@ def _run_imap_sync(cred, user_id: str, src) -> int:
             )
             sender = msg.get("From", "unknown")
 
+            # Count attachments ingested from THIS email
+            ingested_this_email = 0
+
             for part in msg.walk():
-                if "attachment" not in part.get("Content-Disposition", ""):
+                content_disposition = part.get("Content-Disposition", "")
+                # Only process actual attachments — skip inline images, text bodies, HTML parts
+                if "attachment" not in content_disposition:
                     continue
                 raw_fname = part.get_filename()
                 if not raw_fname:
@@ -285,8 +351,13 @@ def _run_imap_sync(cred, user_id: str, src) -> int:
                 ext = ("." + filename.rsplit(".", 1)[-1].lower()) if "." in filename else ""
                 if ext not in SUPPORTED_EXTS:
                     continue
+
+                file_bytes_data = part.get_payload(decode=True)
+                if not file_bytes_data:
+                    continue
+
                 ingest_bytes(
-                    file_bytes    = part.get_payload(decode=True),
+                    file_bytes    = file_bytes_data,
                     filename      = filename,
                     user_id       = user_id,
                     purpose       = f"Email attachment: {subject}",
@@ -294,11 +365,17 @@ def _run_imap_sync(cred, user_id: str, src) -> int:
                     source        = "email",
                     email_context = {"subject": subject, "sender": sender, "msg_id": msg_id.decode()},
                 )
+                ingested_this_email += 1
                 ingested += 1
 
-            mail.store(msg_id, "+FLAGS", "\\Seen")
+            # CRITICAL: Only mark as Seen if we actually ingested something.
+            # Pure conversation emails (no attachments / unsupported extensions)
+            # are left UNREAD so the sender doesn't miss them in their inbox.
+            if ingested_this_email > 0:
+                mail.store(msg_id, "+FLAGS", "\\Seen")
+
         except Exception:
-            continue  # skip individual failures
+            continue  # skip individual failures — never crash the whole sync
 
     cred.last_synced_at = datetime.now(timezone.utc)
     cred.save()

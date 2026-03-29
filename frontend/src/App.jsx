@@ -11,6 +11,8 @@ import UsersPage      from "./pages/UsersPage";
 import Settings       from "./pages/Settings";
 import Analytics      from "./pages/Analytics";
 import Layout         from "./components/Layout";
+import AuditLogPage   from "./pages/AuditLogPage";
+import Onboarding     from "./pages/Onboarding";
 
 const PrivateRoute = ({ children }) => {
   const token = localStorage.getItem("token");
@@ -33,6 +35,8 @@ export default function App() {
           <Route path="analytics"     element={<Analytics />}                />
           <Route path="users"         element={<UsersPage />}                />
           <Route path="settings"      element={<Settings />}                 />
+          <Route path="/audit-log"    element={<AuditLogPage />}             />
+          <Route path="onboarding"    element={<Onboarding />}               />
         </Route>
       </Routes>
     </BrowserRouter>

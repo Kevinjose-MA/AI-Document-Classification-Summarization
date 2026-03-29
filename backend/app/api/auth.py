@@ -9,7 +9,7 @@ from app.core.config import SECRET_KEY
 
 from fastapi import Depends, Header
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-
+from app.core.encryption import encrypt_password
 
 router = APIRouter()
 
@@ -204,17 +204,14 @@ def delete_user(user_id: str, admin=Depends(require_admin)):
     return {"message": "User deleted"}
 
 
-    # ── Add these to app/api/auth.py ─────────────────────────────
-# These two endpoints handle saving and retrieving email credentials.
-# The password is stored as-is here. In production, encrypt with Fernet.
+from app.models.models import EmailCredentialModel
 
-from app.models.models import EmailCredentialModel  # already in your models.py
 
 class EmailCredentialSchema(BaseModel):
-    imap_host:      str  = "imap.gmail.com"
-    imap_port:      int  = 993
+    imap_host:      str = "imap.gmail.com"
+    imap_port:      int = 993
     email_address:  str
-    email_password: str  # app password / oauth token
+    email_password: str
 
 
 @router.post("/auth/email-credentials")
@@ -222,16 +219,16 @@ def save_email_credentials(
     data: EmailCredentialSchema,
     user: dict = Depends(get_current_user),
 ):
-    """Save or update IMAP credentials for the current user."""
-    user_id = str(user["user_id"])
+    """Save IMAP credentials for the currently logged-in user only."""
+    user_id       = str(user["user_id"])
+    encrypted_pwd = encrypt_password(data.email_password)  # ← encrypt before saving
 
-    # Upsert — one inbox per user
     cred = EmailCredentialModel.objects(user_id=user_id).first()
     if cred:
         cred.imap_host      = data.imap_host
         cred.imap_port      = data.imap_port
         cred.email_address  = data.email_address
-        cred.email_password = data.email_password
+        cred.email_password = encrypted_pwd  # ← encrypted
         cred.is_active      = True
     else:
         cred = EmailCredentialModel(
@@ -239,10 +236,11 @@ def save_email_credentials(
             imap_host      = data.imap_host,
             imap_port      = data.imap_port,
             email_address  = data.email_address,
-            email_password = data.email_password,
+            email_password = encrypted_pwd,  # ← encrypted
             is_active      = True,
         )
     cred.save()
+    # password never returned
     return {
         "message":       "Credentials saved",
         "email_address": cred.email_address,
@@ -253,15 +251,27 @@ def save_email_credentials(
 
 @router.get("/auth/email-credentials")
 def get_email_credentials(user: dict = Depends(get_current_user)):
-    """Get current user's email credentials (password never returned)."""
+    """Returns ONLY the current user's credentials. Password never included."""
     user_id = str(user["user_id"])
     cred = EmailCredentialModel.objects(user_id=user_id).first()
     if not cred:
         raise HTTPException(status_code=404, detail="No email credentials configured")
     return {
-        "email_address": cred.email_address,
-        "imap_host":     cred.imap_host,
-        "imap_port":     cred.imap_port,
-        "is_active":     cred.is_active,
+        "email_address":  cred.email_address,
+        "imap_host":      cred.imap_host,
+        "imap_port":      cred.imap_port,
+        "is_active":      cred.is_active,
         "last_synced_at": cred.last_synced_at.isoformat() if cred.last_synced_at else None,
+        # email_password intentionally excluded
     }
+
+
+@router.delete("/auth/email-credentials")
+def delete_email_credentials(user: dict = Depends(get_current_user)):
+    """Delete the current user's email credentials. Only affects the logged-in user."""
+    user_id = str(user["user_id"])
+    cred = EmailCredentialModel.objects(user_id=user_id).first()
+    if not cred:
+        raise HTTPException(status_code=404, detail="No credentials found")
+    cred.delete()
+    return {"message": "Email credentials removed"}

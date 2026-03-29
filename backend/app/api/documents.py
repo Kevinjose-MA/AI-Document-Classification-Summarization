@@ -191,20 +191,12 @@ async def download_document(doc_id: str, password: str = None, user=Depends(get_
         try:
             import pikepdf
             import io as _io
-        except ImportError:
-            raise HTTPException(500, "PDF password handling not available")
-
-        try:
             pdf = pikepdf.open(_io.BytesIO(file_bytes), password=password)
             buf = _io.BytesIO()
             pdf.save(buf)
             file_bytes = buf.getvalue()
-
         except pikepdf.PasswordError:
             raise HTTPException(403, "Incorrect password")
-
-        except Exception as e:
-            raise HTTPException(500, f"PDF processing error: {str(e)}")
 
     return Response(
         content=file_bytes,
@@ -280,6 +272,69 @@ async def get_audit_log(doc_id: str, user=Depends(get_current_user)):
         }
         for l in logs
     ]
+
+
+# ── Org-wide audit log (admin) ────────────────────────────────────────────────
+@router.get("/audit-log")
+async def get_audit_log_all(
+    user=Depends(get_current_user),
+    page:     int = 1,
+    per_page: int = 25,
+    event:    str = None,   # filter by event type
+    dept:     str = None,   # filter by department
+):
+    """
+    Returns paginated audit log across all documents.
+    Admin sees everything. Dept users see only their dept's documents.
+    """
+    def _query():
+        role    = user["role"].lower()
+        user_id = str(user["user_id"])
+
+        if role == "admin":
+            # Get all doc IDs — no restriction
+            doc_ids = None
+        else:
+            # Get only doc IDs belonging to this user's department
+            dept_filter = dept or role
+            docs = DocumentModel.objects(department=dept_filter).only("id")
+            doc_ids = [str(d.id) for d in docs]
+
+        qs = AuditLogModel.objects()
+        if doc_ids is not None:
+            qs = qs.filter(document_id__in=doc_ids)
+        if event:
+            qs = qs.filter(event=event)
+
+        total  = qs.count()
+        offset = (page - 1) * per_page
+        logs   = list(qs.order_by("-timestamp").skip(offset).limit(per_page))
+        return logs, total
+
+    logs, total = await asyncio.to_thread(_query)
+    pages = max(1, -(-total // per_page))
+
+    return {
+        "total":   total,
+        "page":    page,
+        "pages":   pages,
+        "results": [
+            {
+                "id":          str(l.id),
+                "document_id": l.document_id,
+                "filename":    l.filename,
+                "event":       l.event,
+                "detail":      l.detail,
+                "agent":       l.agent,
+                "from_status": l.from_status,
+                "to_status":   l.to_status,
+                "user_id":     l.user_id,
+                "metadata":    l.metadata,
+                "timestamp":   l.timestamp.isoformat() if l.timestamp else None,
+            }
+            for l in logs
+        ],
+    }
 
 
 # ── Delete document ────────────────────────────────────────────────────────────
@@ -410,8 +465,12 @@ def fetch_email_attachments_for_user(user_id: str, cred: EmailCredentialModel):
     Conversation-only emails are never touched — they stay unread.
     """
     try:
+        # Decrypt password before use — it is stored encrypted in MongoDB
+        from app.core.encryption import decrypt_password, is_encrypted
+        imap_password = decrypt_password(cred.email_password) if is_encrypted(cred.email_password) else cred.email_password
+
         mail = imaplib.IMAP4_SSL(cred.imap_host, cred.imap_port)
-        mail.login(cred.email_address, cred.email_password)
+        mail.login(cred.email_address, imap_password)
         mail.select("INBOX")
 
         # Gmail: use server-side filter to pre-select only emails with attachments
