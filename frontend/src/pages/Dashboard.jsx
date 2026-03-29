@@ -22,20 +22,51 @@ export default function Dashboard() {
   const { search } = useOutletContext() || {};
   const [documents, setDocuments] = useState([]);
   const [loading, setLoading]     = useState(true);
+  const [totalCount, setTotalCount] = useState(0);
 
   useEffect(() => {
-    // Fetch first 50 for dashboard stats — no pagination needed here
-    api.get("/documents?per_page=50&page=1")
-      .then((r) => {
-        // Handle both old array response and new paginated response
-        const data = r.data;
-        setDocuments(Array.isArray(data) ? data : (data.results || []));
-      })
-      .catch(console.error)
-      .finally(() => setLoading(false));
+    const fetchAllDocuments = async () => {
+      try {
+        let page = 1;
+        let allDocs = [];
+        let total = 0;
+
+        while (true) {
+          const res = await api.get(`/documents?per_page=50&page=${page}`);
+          const data = res.data;
+
+          if (Array.isArray(data)) {
+            allDocs = data;
+            total = data.length;
+            break;
+          }
+
+          const docs = data.results || [];
+          total = data.total || 0;
+
+          allDocs = [...allDocs, ...docs];
+
+          // stop when all docs fetched
+          if (allDocs.length >= total) break;
+
+          page++;
+        }
+
+        setDocuments(allDocs);  
+        setTotalCount(total);   
+
+      } catch (err) {
+        console.error(err);
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    fetchAllDocuments();
   }, []);
 
-  const total      = documents.length;
+
+  const total      = totalCount;
   const ready      = documents.filter(d => ["ready","processed","completed"].includes(d.routing_status?.toLowerCase())).length;
   const processing = documents.filter(d => ["processing","pending"].includes(d.routing_status?.toLowerCase())).length;
   const review     = documents.filter(d => d.routing_status?.toLowerCase() === "review").length;
