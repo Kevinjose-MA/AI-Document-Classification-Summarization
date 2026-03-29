@@ -3,13 +3,17 @@ import { useEffect, useState, useRef } from "react";
 import api from "../api/axios";
 import { useToast } from "../components/Toast";
 
+// WhatsApp PDF and Hard-copy Scan removed — use Manual Upload for those.
+// These are the 4 ingestion sources that need configuration.
 const SOURCE_CONFIG = {
-  email:      { label: "Email (IMAP)",   icon: "✉️",  manual: false, canSync: true,  accept: null },
-  maximo:     { label: "Maximo Export",  icon: "🏗️",  manual: true,  canSync: false, accept: ".csv,.xlsx,.xls,.pdf" },
-  sharepoint: { label: "SharePoint",     icon: "☁️",  manual: false, canSync: true,  accept: null },
-  whatsapp:   { label: "WhatsApp PDF",   icon: "💬",  manual: true,  canSync: false, accept: ".pdf" },
-  scan:       { label: "Hard-copy Scan", icon: "🖨️",  manual: true,  canSync: false, accept: ".pdf,.png,.jpg,.jpeg" },
-  cloud_link: { label: "Cloud Link",     icon: "🔗",  manual: true,  canSync: false, accept: null },
+  email:      { label: "Email (IMAP)",   icon: "✉️",  manual: false, canSync: true,  accept: null,
+                desc: "Auto-ingest attachments from a connected Gmail / IMAP inbox" },
+  maximo:     { label: "Maximo Export",  icon: "🏗️",  manual: true,  canSync: false, accept: ".csv,.xlsx,.xls,.pdf",
+                desc: "Upload CSV, Excel or PDF exports from IBM Maximo" },
+  sharepoint: { label: "SharePoint",     icon: "☁️",  manual: false, canSync: true,  accept: null,
+                desc: "Sync documents from a SharePoint folder (OAuth required)" },
+  cloud_link: { label: "Cloud Link",     icon: "🔗",  manual: true,  canSync: false, accept: null,
+                desc: "Paste a direct URL to a publicly accessible document" },
 };
 
 const DEPTS = ["engineering", "finance", "legal", "hr", "operations", "compliance", "general"];

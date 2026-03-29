@@ -91,14 +91,20 @@ def ingest_file(file_bytes: bytes, filename: str, user_id: str, purpose: str,
 
     file_hash = compute_file_hash(file_bytes)
 
-    # ── Deduplication ──────────────────────────────────────────────────────────
-    existing = DocumentModel.objects(file_hash=file_hash, user_id=str(user_id)).first()
+    # ── Deduplication — org-wide ───────────────────────────────────────────────
+    # Since all users share the same MongoDB Atlas + GridFS storage, the same
+    # file uploaded by any user is treated as a duplicate. We check by hash only,
+    # not by user_id. The existing document record is returned so the frontend
+    # can redirect to it instead of creating a second copy.
+    existing = DocumentModel.objects(file_hash=file_hash).first()
     if existing:
-        logger.info(f"[INGEST] Duplicate | file={filename} | doc_id={existing.id}")
+        logger.info(f"[INGEST] Duplicate (org-wide) | file={filename} | existing_doc={existing.id} | uploaded_by={existing.user_id}")
         raise HTTPException(status_code=409, detail={
-            "status": "duplicate",
+            "status":      "duplicate",
             "document_id": str(existing.id),
-            "filename": existing.filename,
+            "filename":    existing.filename,
+            "department":  existing.department,
+            "uploaded_by": existing.user_id,
         })
 
     # ── Encryption check ───────────────────────────────────────────────────────

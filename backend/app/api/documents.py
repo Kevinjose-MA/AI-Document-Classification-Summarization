@@ -191,12 +191,20 @@ async def download_document(doc_id: str, password: str = None, user=Depends(get_
         try:
             import pikepdf
             import io as _io
+        except ImportError:
+            raise HTTPException(500, "PDF password handling not available")
+
+        try:
             pdf = pikepdf.open(_io.BytesIO(file_bytes), password=password)
             buf = _io.BytesIO()
             pdf.save(buf)
             file_bytes = buf.getvalue()
+
         except pikepdf.PasswordError:
             raise HTTPException(403, "Incorrect password")
+
+        except Exception as e:
+            raise HTTPException(500, f"PDF processing error: {str(e)}")
 
     return Response(
         content=file_bytes,

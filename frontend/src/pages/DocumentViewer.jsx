@@ -153,6 +153,7 @@ export default function DocumentViewer() {
   const [showPwdModal, setShowPwdModal] = useState(false);
   const [pwdLoading, setPwdLoading]     = useState(false);
   const [pwdError, setPwdError]         = useState("");
+  const [previewUrl, setPreviewUrl] = useState(null);
 
   const fetchDoc = () => {
     api.get(`/documents/${id}`)
@@ -161,7 +162,26 @@ export default function DocumentViewer() {
       .finally(() => setLoading(false));
   };
 
-  useEffect(() => { fetchDoc(); }, [id]);
+  useEffect(() => {
+    const fetchPreview = async () => {
+      try {
+        const res = await api.get(`/documents/${id}/preview`, {
+          responseType: "blob",
+        });
+        const url = URL.createObjectURL(res.data);
+        setPreviewUrl(url);
+      } catch {
+        setPreviewError(true);
+      }
+    };
+
+    fetchDoc();
+    fetchPreview();
+
+    return () => {
+      if (previewUrl) URL.revokeObjectURL(previewUrl);
+    };
+  }, [id]);
 
   const handleDelete = async () => {
     try {
@@ -384,10 +404,10 @@ export default function DocumentViewer() {
                   </button>
                 </div>
               ) : isPDF ? (
-                <iframe src={fileUrl} title="Document preview" className="w-full rounded-lg"
+                <iframe src={previewUrl} title="Document preview" className="w-full rounded-lg"
                   style={{ minHeight: "72vh" }} onError={() => setPreviewError(true)} />
               ) : isImage ? (
-                <img src={fileUrl} alt={doc.filename} className="max-h-[72vh] mx-auto rounded-lg object-contain"
+                <img src={previewUrl} alt={doc.filename} className="max-h-[72vh] mx-auto rounded-lg object-contain"
                   onError={() => setPreviewError(true)} />
               ) : (
                 <div className="flex-1 flex flex-col items-center justify-center gap-3 py-16">
