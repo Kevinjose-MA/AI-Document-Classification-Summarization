@@ -9,6 +9,9 @@ import logging
 import os
 from PIL import Image
 import pytesseract
+import numpy as np
+import cv2
+from PIL import ImageFilter, ImageEnhance
 from email import policy
 from bs4 import BeautifulSoup
 from io import BytesIO
@@ -144,13 +147,142 @@ def _assess_ocr_confidence(text: str) -> float:
     return 0.35
 
 
-def _extract_text_from_image(file_bytes: bytes) -> str:
+def _preprocess_pil_image(pil_img: Image.Image, upscale: bool = True) -> Image.Image:
+    """Apply grayscale, denoise, adaptive threshold, sharpen, upscale and contrast."""
     try:
-        pil_img = Image.open(BytesIO(file_bytes))
-        ocr_text = pytesseract.image_to_string(pil_img, lang="eng")
-        return _clean_extracted_text(ocr_text)
-    except Exception:
-        return ""
+        # Convert to OpenCV image
+        img = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
+        # Grayscale
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+        # Denoise
+        denoised = cv2.fastNlMeansDenoising(gray, None, h=10, templateWindowSize=7, searchWindowSize=21)
+
+        # Adaptive threshold (helps with mixed contrast)
+        th = cv2.adaptiveThreshold(denoised, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                   cv2.THRESH_BINARY, 15, 8)
+
+        proc = th
+
+        # Upscale small images
+        if upscale:
+            h, w = proc.shape
+            scale = 1.0
+            if max(h, w) < 1000:
+                scale = 2.0
+            elif max(h, w) < 2000:
+                scale = 1.5
+            if scale != 1.0:
+                proc = cv2.resize(proc, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+
+        # Convert back to PIL for sharpening/contrast
+        pil_proc = Image.fromarray(proc)
+        pil_proc = pil_proc.convert("L")
+
+        # Sharpen
+        pil_proc = pil_proc.filter(ImageFilter.UnsharpMask(radius=1, percent=150, threshold=3))
+
+        # Contrast
+        enhancer = ImageEnhance.Contrast(pil_proc)
+        pil_proc = enhancer.enhance(1.3)
+
+        return pil_proc
+    except Exception as e:
+        logger.warning(f"Image preprocessing failed: {e}")
+        try:
+            return pil_img.convert("L")
+        except Exception:
+            return pil_img
+
+
+def _ocr_fallback_engines(pil_img: Image.Image) -> dict:
+    """Attempt multiple OCR backends and merge results with simple confidence heuristics.
+    Returns dict: {"text": str, "confidence": float, "warnings": [str], "sources": [engine names]}"""
+    results = []
+
+    # EasyOCR
+    try:
+        import easyocr
+        reader = easyocr.Reader(["en"], gpu=False)
+        arr = np.array(pil_img.convert("RGB"))
+        raw = reader.readtext(arr)
+        text = "\n".join([t[1] for t in raw if t[1].strip()])
+        confs = [t[2] for t in raw if isinstance(t[2], (int, float))]
+        conf = float(np.mean(confs)) if confs else 0.0
+        results.append(("easyocr", text, conf))
+    except Exception as e:
+        logger.info(f"EasyOCR not available or failed: {e}")
+
+    # PaddleOCR
+    try:
+        from paddleocr import PaddleOCR
+        ocr = PaddleOCR(use_angle_cls=True, lang="en")
+        arr = np.array(pil_img.convert("RGB"))
+        raw = ocr.ocr(arr, cls=True)
+        texts = []
+        confs = []
+        for line in raw:
+            for seg in line:
+                txt = seg[1][0]
+                confs.append(float(seg[1][1]))
+                texts.append(txt)
+        text = "\n".join(t for t in texts if t.strip())
+        conf = float(np.mean(confs)) if confs else 0.0
+        results.append(("paddleocr", text, conf))
+    except Exception as e:
+        logger.info(f"PaddleOCR not available or failed: {e}")
+
+    # Tesseract (pytesseract)
+    try:
+        data = pytesseract.image_to_data(pil_img, lang="eng", output_type=pytesseract.Output.DICT)
+        texts = []
+        confs = []
+        for i, txt in enumerate(data.get("text", [])):
+            if txt and txt.strip():
+                texts.append(txt.strip())
+                try:
+                    conf = float(data.get("conf", [0]*len(data.get("text", [])))[i])
+                    if conf > -1:
+                        confs.append(conf/100.0)
+                except Exception:
+                    pass
+        text = "\n".join(texts)
+        conf = float(np.mean(confs)) if confs else 0.0
+        results.append(("tesseract", text, conf))
+    except Exception as e:
+        logger.info(f"Tesseract OCR failed: {e}")
+
+    # Merge results: pick longest reasonable text with decent confidence, or merge by union
+    if not results:
+        return {"text": "", "confidence": 0.0, "warnings": ["No OCR engines available"], "sources": []}
+
+    # Normalize confidences and choose best
+    best = max(results, key=lambda r: (len(r[1].strip())>0, r[2], len(r[1])))
+    merged_text = best[1]
+    merged_conf = max(0.0, min(1.0, float(best[2] or 0.0)))
+    sources = [r[0] for r in results if r[1].strip()]
+
+    # If different engines produced non-overlapping content, merge unique lines
+    if len(results) > 1:
+        all_lines = []
+        seen = set()
+        for _, txt, _ in sorted(results, key=lambda r: -len(r[1])):
+            for line in txt.splitlines():
+                l = line.strip()
+                if not l or l in seen:
+                    continue
+                seen.add(l)
+                all_lines.append(l)
+        if len(all_lines) > len(merged_text.splitlines()):
+            merged_text = "\n".join(all_lines)
+            # boost confidence slightly when multiple engines agree
+            merged_conf = min(0.99, merged_conf + 0.1)
+
+    warnings = []
+    if merged_conf < 0.45:
+        warnings.append("Low OCR confidence: extracted text may be incomplete or noisy.")
+
+    return {"text": _clean_extracted_text(merged_text), "confidence": merged_conf, "warnings": warnings, "sources": sources}
 
 
 def _summarize_image_with_vision(file_bytes: bytes, filename: str) -> dict:
@@ -161,9 +293,17 @@ def _summarize_image_with_vision(file_bytes: bytes, filename: str) -> dict:
     """
     import base64
 
-    ocr_text = _extract_text_from_image(file_bytes)
-    ocr_confidence = _assess_ocr_confidence(ocr_text)
-    visual_only = not bool(ocr_text.strip())
+    # First attempt: preprocess image and run multi-engine OCR
+    try:
+        pil_img = Image.open(BytesIO(file_bytes)).convert("RGB")
+    except Exception:
+        pil_img = Image.open(BytesIO(file_bytes))
+
+    pre_img = _preprocess_pil_image(pil_img, upscale=True)
+    ocr_result = _ocr_fallback_engines(pre_img)
+    ocr_text = ocr_result.get("text", "")
+    ocr_confidence = ocr_result.get("confidence", 0.0)
+    visual_only = False if ocr_text.strip() else True
 
     # Detect mime type from image header bytes
     mime = "image/png"
@@ -207,6 +347,8 @@ def _summarize_image_with_vision(file_bytes: bytes, filename: str) -> dict:
                 "ocr_text":              ocr_text,
                 "ocr_confidence":        ocr_confidence,
                 "visual_only":           visual_only,
+                "ocr_sources":           ocr_result.get("sources", []),
+                "ocr_warnings":          ocr_result.get("warnings", []),
             }
             if ocr_confidence < 0.5 and ocr_text.strip():
                 summary["data_quality_notes"] = "Low-confidence OCR extraction. Some text may require manual verification."
@@ -220,17 +362,20 @@ def _summarize_image_with_vision(file_bytes: bytes, filename: str) -> dict:
             fallback_summary["ocr_text"] = ocr_text
             fallback_summary["ocr_confidence"] = ocr_confidence
             fallback_summary["visual_only"] = visual_only
-            if ocr_confidence < 0.5:
-                fallback_summary["data_quality_notes"] = "Low-confidence OCR extraction. Some text may require manual verification."
+            fallback_summary["ocr_sources"] = ocr_result.get("sources", [])
+            fallback_summary["ocr_warnings"] = ocr_result.get("warnings", [])
+            if ocr_confidence < 0.45:
+                fallback_summary.setdefault("data_quality_notes", "Low-confidence OCR extraction. Some text may require manual verification.")
             return fallback_summary
         logger.error(f"OCR fallback also failed for {filename}: no meaningful text extracted")
         return {
-            "purpose": "This image contains visual content with no reliably extracted text.",
+            "purpose": "This image contains visual content. OCR attempted but returned minimal text.",
             "key_points": [],
             "risks_or_implications": "",
             "ocr_text": "",
             "ocr_confidence": 0.0,
             "visual_only": True,
+            "ocr_warnings": ["No text extracted by any OCR engine."],
         }
 
 

@@ -2,6 +2,7 @@
 import { useParams, useNavigate } from "react-router-dom";
 import { useEffect, useState } from "react";
 import api, { API_BASE } from "../api/axios";
+import ChatBox from "../components/ChatBox";
 import StatusBadge from "../components/StatusBadge";
 import ConfirmDialog from "../components/ConfirmDialog";
 import { useToast } from "../components/Toast";
@@ -430,6 +431,7 @@ export default function DocumentViewer() {
                 { id: "summary",  label: "AI Analysis" },
                 { id: "metadata", label: "Metadata"    },
                 ...(hasClauses ? [{ id: "clauses", label: `Clauses (${doc.clauses.length})` }] : []),
+                { id: "chat", label: "Chat" },
               ].map((tab) => (
                 <button key={tab.id} onClick={() => setActiveTab(tab.id)}
                   className={`flex-1 py-1.5 text-xs font-medium rounded-lg transition-all cursor-pointer ${
@@ -508,6 +510,16 @@ export default function DocumentViewer() {
                       )}
                     </>
                   )}
+                </div>
+              </div>
+            )}
+
+            {/* Chat tab */}
+            {activeTab === "chat" && (
+              <div className="fade-up">
+                <div className="p-0">
+                  {/* Lazy load chat component to keep changes minimal */}
+                  <ChatBox documentId={id} />
                 </div>
               </div>
             )}

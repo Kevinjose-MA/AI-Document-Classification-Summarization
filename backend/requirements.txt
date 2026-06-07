@@ -10,6 +10,11 @@ pymupdf==1.24.9
 pikepdf==9.0.0
 pillow==10.4.0
 pytesseract==0.3.10
+easyocr==1.6.2
+paddleocr==2.6.1
+opencv-python-headless==4.7.0.72
+scikit-image==0.21.0
+numpy==1.25.2
 
 faiss-cpu==1.12.0
 
