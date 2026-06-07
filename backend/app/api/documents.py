@@ -14,8 +14,9 @@ from bson import ObjectId
 from app.models.models import DocumentModel, EmailCredentialModel, AuditLogModel
 from app.services.ingestion import ingest_upload, ingest_bytes
 from app.services import storage as gridfs_storage
+from app.services import blob_storage
 from app.core.config import SECRET_KEY
-from app.api.auth import get_current_user_id
+from app.core.encryption import encrypt_password
 
 router    = APIRouter()
 security  = HTTPBearer()
@@ -159,6 +160,9 @@ async def get_document(doc_id: str, user=Depends(get_current_user)):
         "confidence":        getattr(doc, "confidence", None),
         "encrypted_external": doc.encrypted_external,
         "file_id":           doc.file_id,
+        "file_url":          getattr(doc, "file_url", None),
+        "storage_provider":  getattr(doc, "storage_provider", None),
+        "public_id":         getattr(doc, "public_id", None),
     }
 
 
@@ -208,6 +212,14 @@ async def download_document(doc_id: str, password: str = None, user=Depends(get_
 async def _load_file(doc) -> tuple:
     """Load file bytes from GridFS (new) or local disk (legacy)."""
     # Try GridFS first
+    # Cloudinary / external file URL first
+    if getattr(doc, "storage_provider", None) == "cloudinary" and getattr(doc, "file_url", None):
+        try:
+            return await asyncio.to_thread(blob_storage.load, doc.file_url)
+        except FileNotFoundError:
+            pass
+
+    # GridFS fallback
     if doc.file_id:
         try:
             file_bytes, content_type = await asyncio.to_thread(
@@ -217,8 +229,8 @@ async def _load_file(doc) -> tuple:
         except FileNotFoundError:
             pass
 
-    # Fall back to local disk for old documents
-    if doc.storage_path and os.path.exists(doc.storage_path):
+    # Fall back to local disk for legacy documents
+    if getattr(doc, "storage_path", None) and os.path.exists(doc.storage_path):
         with open(doc.storage_path, "rb") as f:
             return f.read(), doc.content_type or "application/octet-stream"
 
@@ -346,6 +358,12 @@ async def delete_document(doc_id: str, user=Depends(get_current_user)):
     if user["role"].lower() != "admin" and str(doc.user_id) != str(user["user_id"]):
         raise HTTPException(403, "Access denied")
 
+    if getattr(doc, "storage_provider", None) == "cloudinary" and getattr(doc, "public_id", None):
+        try:
+            await asyncio.to_thread(blob_storage.delete, doc.public_id)
+        except Exception:
+            pass
+
     # Delete from GridFS too
     if doc.file_id:
         try:
@@ -379,18 +397,20 @@ async def connect_email(data: EmailCredentialSchema, user=Depends(get_current_us
     except Exception as e:
         raise HTTPException(400, f"Could not connect to mail server: {e}")
 
+    encrypted_password = encrypt_password(data.email_password)
+    encrypted_password = encrypt_password(data.email_password)
     cred = await asyncio.to_thread(
         lambda: EmailCredentialModel.objects(user_id=str(user["user_id"])).first()
     )
     if cred:
         cred.imap_host = data.imap_host; cred.imap_port = data.imap_port
-        cred.email_address = data.email_address; cred.email_password = data.email_password
+        cred.email_address = data.email_address; cred.email_password = encrypted_password
         cred.is_active = True; cred.connected_at = datetime.utcnow()
     else:
         cred = EmailCredentialModel(
             user_id=str(user["user_id"]), imap_host=data.imap_host,
             imap_port=data.imap_port, email_address=data.email_address,
-            email_password=data.email_password,
+            email_password=encrypted_password,
         )
     await asyncio.to_thread(cred.save)
     return {"message": "Email connected", "email": data.email_address}

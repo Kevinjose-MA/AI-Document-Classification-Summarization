@@ -51,11 +51,17 @@ class DocumentModel(Document):
     received_at = DateTimeField(default=datetime.utcnow)
 
     # ── Storage ───────────────────────────────────────────────────────────────
-    # file_id      → GridFS object ID (new — cloud, works from any machine)
-    # storage_path → local filesystem path (legacy — kept for old documents)
-    # Only one will be set per document. Preview/download checks file_id first.
-    file_id      = StringField(default=None)   # GridFS ID
-    storage_path = StringField(default=None)   # legacy local path
+    # file_id        → GridFS object ID (new — cloud, works from any machine)
+    # storage_path   → local filesystem path (legacy — kept for old documents)
+    # public_id      → Cloudinary public ID when using external blob storage
+    # file_url       → External URL for preview/download
+    # storage_provider → storage backend name: cloudinary | gridfs | local
+    # Only one of file_id / file_url / storage_path will be used for new documents.
+    file_id          = StringField(default=None)   # GridFS ID
+    storage_path     = StringField(default=None)   # legacy local path
+    storage_provider = StringField(default="gridfs")
+    public_id        = StringField(default=None)
+    file_url         = StringField(default=None)
 
     encrypted_external = BooleanField(default=False)
 

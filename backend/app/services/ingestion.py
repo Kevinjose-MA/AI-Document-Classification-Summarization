@@ -7,6 +7,7 @@ from fastapi import UploadFile, HTTPException
 from app.models.models import DocumentModel, AuditLogModel
 from app.services.extractor import extract_clauses_from_bytes
 from app.services import storage   # ← GridFS storage service
+from app.services import blob_storage
 import logging
 
 logger = logging.getLogger("INGEST")
@@ -139,34 +140,57 @@ def ingest_file(file_bytes: bytes, filename: str, user_id: str, purpose: str,
     routing_status = metadata.get("routing_status", "review").strip().lower()
     sensitivity    = metadata.get("sensitivity", "medium").strip().lower()
 
-    # ── Save to GridFS (cloud — accessible from any machine) ───────────────────
+    # ── Save to external blob storage first (Cloudinary) and fallback to GridFS/local ─────
     safe_name = sanitize_filename(filename)
-    file_id   = None
-    storage_path = None
+    file_id      = None
+    storage_path  = None
+    file_url      = None
+    public_id     = None
+    storage_provider = "gridfs"
 
-    try:
-        file_id = storage.save(file_bytes, safe_name, content_type or "application/octet-stream")
-        logger.info(f"[INGEST] Saved to GridFS | file_id={file_id}")
-    except Exception as e:
-        # GridFS failed — fall back to local disk so ingestion doesn't hard-fail
-        logger.warning(f"[INGEST] GridFS save failed, falling back to disk: {e}")
-        dept_dir = os.path.join(UPLOAD_DIR, department)
-        os.makedirs(dept_dir, exist_ok=True)
-        storage_path = os.path.join(dept_dir, safe_name)
-        counter = 1
-        while os.path.exists(storage_path):
-            name, ext = os.path.splitext(safe_name)
-            storage_path = os.path.join(dept_dir, f"{name}_{counter}{ext}")
-            counter += 1
-        with open(storage_path, "wb") as f:
-            f.write(file_bytes)
+    if blob_storage.is_configured():
+        try:
+            result = blob_storage.save(
+                file_bytes,
+                safe_name,
+                content_type or "application/octet-stream",
+                public_id=file_hash,
+            )
+            file_url = result.get("url")
+            public_id = result.get("public_id")
+            storage_provider = "cloudinary"
+            logger.info(f"[INGEST] Saved to Cloudinary | public_id={public_id}")
+        except Exception as e:
+            logger.warning(f"[INGEST] Cloudinary upload failed, falling back to GridFS: {e}")
+
+    if storage_provider != "cloudinary":
+        try:
+            file_id = storage.save(file_bytes, safe_name, content_type or "application/octet-stream")
+            storage_provider = "gridfs"
+            logger.info(f"[INGEST] Saved to GridFS | file_id={file_id}")
+        except Exception as e:
+            logger.warning(f"[INGEST] GridFS save failed, falling back to disk: {e}")
+            storage_provider = "local"
+            dept_dir = os.path.join(UPLOAD_DIR, department)
+            os.makedirs(dept_dir, exist_ok=True)
+            storage_path = os.path.join(dept_dir, safe_name)
+            counter = 1
+            while os.path.exists(storage_path):
+                name, ext = os.path.splitext(safe_name)
+                storage_path = os.path.join(dept_dir, f"{name}_{counter}{ext}")
+                counter += 1
+            with open(storage_path, "wb") as f:
+                f.write(file_bytes)
 
     # ── Persist document record ────────────────────────────────────────────────
     doc = DocumentModel(
         user_id            = str(user_id),
         filename           = safe_name,
-        file_id            = file_id,        # GridFS ID (None if fell back to disk)
-        storage_path       = storage_path,   # local path (None if GridFS succeeded)
+        file_id            = file_id,        # GridFS ID (None if cloudinary/local)
+        storage_path       = storage_path,   # local path (None if cloudinary/GridFS succeeded)
+        storage_provider   = storage_provider,
+        public_id          = public_id,
+        file_url           = file_url,
         encrypted_external = encrypted_external,
         file_hash          = file_hash,
         file_size          = len(file_bytes),
@@ -204,7 +228,7 @@ def ingest_file(file_bytes: bytes, filename: str, user_id: str, purpose: str,
             "sensitivity": sensitivity,
             "confidence":  metadata.get("confidence"),
             "source":      source,
-            "storage":     "gridfs" if file_id else "local",
+            "storage":     storage_provider,
         },
     )
 
