@@ -13,6 +13,7 @@ pytesseract==0.3.10
 # Optional: EasyOCR (only install if necessary for scene-text). Omit by default to reduce memory.
 # easyocr==1.7.1
 paddleocr==2.8.1
+paddlepaddle==2.8.1
 opencv-python-headless==4.10.0.84
 numpy==1.26.4
 

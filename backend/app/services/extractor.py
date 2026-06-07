@@ -181,36 +181,42 @@ def _preprocess_pil_image(pil_img: Image.Image, upscale: bool = True) -> Image.I
         # Grayscale
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
-        # Denoise
-        denoised = cv2.fastNlMeansDenoising(gray, None, h=10, templateWindowSize=7, searchWindowSize=21)
+        # Denoise (tuned for noisy/scanned images)
+        denoised = cv2.fastNlMeansDenoising(gray, None, h=14, templateWindowSize=7, searchWindowSize=21)
 
-        # Adaptive threshold (helps with mixed contrast)
+        # Adaptive threshold (helps with mixed contrast) - smaller block for small fonts
         th = cv2.adaptiveThreshold(denoised, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                                   cv2.THRESH_BINARY, 15, 8)
+                                   cv2.THRESH_BINARY, 11, 8)
 
         proc = th
+        logger.debug(f"Preprocessing: adaptiveThreshold applied; upscale={upscale}")
 
-        # Upscale small images
+        # Upscale small images (more aggressive for small-font tables)
         if upscale:
             h, w = proc.shape
             scale = 1.0
-            if max(h, w) < 1000:
+            if max(h, w) < 1200:
+                scale = 3.0
+            elif max(h, w) < 2400:
                 scale = 2.0
-            elif max(h, w) < 2000:
+            elif max(h, w) < 3600:
                 scale = 1.5
             if scale != 1.0:
                 proc = cv2.resize(proc, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+                logger.debug(f"Preprocessing: resized image with scale={scale}")
 
         # Convert back to PIL for sharpening/contrast
         pil_proc = Image.fromarray(proc)
         pil_proc = pil_proc.convert("L")
 
-        # Sharpen
-        pil_proc = pil_proc.filter(ImageFilter.UnsharpMask(radius=1, percent=150, threshold=3))
+        # Sharpen (tuned)
+        pil_proc = pil_proc.filter(ImageFilter.UnsharpMask(radius=1, percent=200, threshold=1))
+        logger.debug("Preprocessing: UnsharpMask applied (r=1,p=200,t=1)")
 
         # Contrast
         enhancer = ImageEnhance.Contrast(pil_proc)
-        pil_proc = enhancer.enhance(1.3)
+        pil_proc = enhancer.enhance(1.5)
+        logger.debug("Preprocessing: Contrast enhanced by factor 1.5")
 
         return pil_proc
     except Exception as e:
@@ -236,12 +242,13 @@ def _ocr_fallback_engines(pil_img: Image.Image) -> dict:
 
             # Detect horizontal and vertical lines
             cols = inv.shape[1]
-            horizontal_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (max(10, cols // 15), 1))
+            # Use thinner kernels to detect finer table lines (helpful for dense screenshots)
+            horizontal_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (max(8, cols // 40), 1))
             detect_horizontal = cv2.erode(inv, horizontal_kernel, iterations=1)
             detect_horizontal = cv2.dilate(detect_horizontal, horizontal_kernel, iterations=1)
 
             rows = inv.shape[0]
-            vertical_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, max(10, rows // 15)))
+            vertical_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, max(8, rows // 40)))
             detect_vertical = cv2.erode(inv, vertical_kernel, iterations=1)
             detect_vertical = cv2.dilate(detect_vertical, vertical_kernel, iterations=1)
 
@@ -249,8 +256,8 @@ def _ocr_fallback_engines(pil_img: Image.Image) -> dict:
             # Find contours for cells
             contours, _ = cv2.findContours(table_mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
             boxes = [cv2.boundingRect(c) for c in contours]
-            # Filter small boxes
-            boxes = [b for b in boxes if b[2] > 20 and b[3] > 10]
+            # Filter small boxes (allow smaller cells)
+            boxes = [b for b in boxes if b[2] > 10 and b[3] > 8]
             if len(boxes) < 4:
                 return None
 
@@ -282,12 +289,16 @@ def _ocr_fallback_engines(pil_img: Image.Image) -> dict:
                 cells = []
                 for (x, y, w, h) in r:
                     crop = arr[y:y+h, x:x+w]
-                    # small pad
-                    pad = 2
+                    # small pad (tuned)
+                    pad = 4
                     yh = max(0, y - pad); yb = min(arr.shape[0], y + h + pad)
                     xl = max(0, x - pad); xr = min(arr.shape[1], x + w + pad)
                     crop = arr[yh:yb, xl:xr]
-                    txt = pytesseract.image_to_string(crop, lang="eng", config='--psm 6')
+                    # Use psm 7 for single-line cell content (faster/cleaner)
+                    try:
+                        txt = pytesseract.image_to_string(crop, lang="eng", config='--psm 7')
+                    except Exception:
+                        txt = ""
                     txt = txt.replace("\n", " ").strip()
                     cells.append(txt)
                 table_rows.append(cells)
@@ -305,21 +316,9 @@ def _ocr_fallback_engines(pil_img: Image.Image) -> dict:
         # If a table is detected with multiple cells, add as a high-confidence result
         if table_res.get("cells", 0) >= 4:
             results.append(("table", table_res.get("csv", ""), 0.9))
+            logger.info(f"Table detected: cells={table_res.get('cells')}, adding as high-confidence source")
 
-    # EasyOCR (lazy)
-    try:
-        reader = _get_easyocr_reader()
-        if reader:
-            arr = np.array(pil_img.convert("RGB"))
-            raw = reader.readtext(arr)
-            text = "\n".join([t[1] for t in raw if t[1].strip()])
-            confs = [t[2] for t in raw if isinstance(t[2], (int, float))]
-            conf = float(np.mean(confs)) if confs else 0.0
-            results.append(("easyocr", text, conf))
-    except Exception as e:
-        logger.info(f"EasyOCR failed at runtime: {e}")
-
-    # PaddleOCR (lazy)
+    # PaddleOCR (lazy primary)
     try:
         ocr = _get_paddle_ocr()
         if ocr:
@@ -337,9 +336,46 @@ def _ocr_fallback_engines(pil_img: Image.Image) -> dict:
                     texts.append(txt)
             text = "\n".join(t for t in texts if t.strip())
             conf = float(np.mean(confs)) if confs else 0.0
-            results.append(("paddleocr", text, conf))
+            if text.strip():
+                results.append(("paddleocr", text, conf))
+                logger.info(f"OCR engine used: paddleocr, conf={conf:.3f}, chars={len(text)}")
     except Exception as e:
         logger.info(f"PaddleOCR failed at runtime: {e}")
+
+    # Tesseract fallback
+    try:
+        data = pytesseract.image_to_data(pil_img, lang="eng", output_type=pytesseract.Output.DICT)
+        texts = []
+        confs = []
+        for i, txt in enumerate(data.get("text", [])):
+            if txt and txt.strip():
+                texts.append(txt.strip())
+                try:
+                    conf = float(data.get("conf", [0]*len(data.get("text", [])))[i])
+                    if conf > -1:
+                        confs.append(conf/100.0)
+                except Exception:
+                    pass
+        text = "\n".join(texts)
+        conf = float(np.mean(confs)) if confs else 0.0
+        results.append(("tesseract", text, conf))
+        logger.info(f"OCR engine used: tesseract, conf={conf:.3f}, chars={len(text)}")
+    except Exception as e:
+        logger.info(f"Tesseract OCR failed: {e}")
+
+    # EasyOCR optional support (disabled by default unless installed)
+    try:
+        reader = _get_easyocr_reader()
+        if reader:
+            arr = np.array(pil_img.convert("RGB"))
+            raw = reader.readtext(arr)
+            text = "\n".join([t[1] for t in raw if t[1].strip()])
+            confs = [t[2] for t in raw if isinstance(t[2], (int, float))]
+            conf = float(np.mean(confs)) if confs else 0.0
+            results.append(("easyocr", text, conf))
+            logger.info(f"OCR engine used: easyocr, conf={conf:.3f}, chars={len(text)}")
+    except Exception as e:
+        logger.info(f"EasyOCR failed at runtime: {e}")
 
     # Tesseract (pytesseract)
     try:
@@ -358,6 +394,7 @@ def _ocr_fallback_engines(pil_img: Image.Image) -> dict:
         text = "\n".join(texts)
         conf = float(np.mean(confs)) if confs else 0.0
         results.append(("tesseract", text, conf))
+        logger.info(f"OCR engine used: tesseract, conf={conf:.3f}, chars={len(text)}")
     except Exception as e:
         logger.info(f"Tesseract OCR failed: {e}")
 
@@ -388,8 +425,15 @@ def _ocr_fallback_engines(pil_img: Image.Image) -> dict:
             merged_conf = min(0.99, merged_conf + 0.1)
 
     warnings = []
-    if merged_conf < 0.45:
+    if merged_conf < 0.50:
         warnings.append("Low OCR confidence: extracted text may be incomplete or noisy.")
+
+    # Log fallback activation if best engine isn't Tesseract (indicates fallback)
+    try:
+        if sources and 'tesseract' not in sources:
+            logger.info(f"Fallback OCR sequence used: sources={sources}")
+    except Exception:
+        pass
 
     return {"text": _clean_extracted_text(merged_text), "confidence": merged_conf, "warnings": warnings, "sources": sources}
 
