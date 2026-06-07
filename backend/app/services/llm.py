@@ -163,6 +163,7 @@ def generate_text_completion(
     max_tokens: int = 500,
     image_b64: str | None = None,
     image_mime: str = "image/png",
+    response_mime_type: str | None = None,
 ) -> str:
     """
     Wrapper for text or vision completion used by the summarizer.
@@ -180,13 +181,17 @@ def generate_text_completion(
         else:
             contents = [{"role": "user", "parts": [prompt]}]
 
+        generation_config = {
+            "temperature": 0.1,
+            "top_p": 0.7,
+            "max_output_tokens": max_tokens,
+        }
+        if response_mime_type:
+            generation_config["response_mime_type"] = response_mime_type
+
         response = get_genai_model().generate_content(
             contents=contents,
-            generation_config={
-                "temperature": 0.1,
-                "top_p": 0.7,
-                "max_output_tokens": max_tokens
-            }
+            generation_config=generation_config,
         )
 
         text = None

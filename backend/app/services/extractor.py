@@ -549,17 +549,21 @@ def _reduce_prompt(chunk_results: list, filename: str) -> str:
 
 def _parse_json(raw: str) -> dict:
     """
-    Robust JSON parser with multiple fallback strategies:
-    1. Strip markdown fences
-    2. Extract first {...} block if there is surrounding text
-    3. Fix common LLM JSON mistakes (trailing commas, single quotes)
+    Robust JSON parser with multiple fallback strategies.
+    Normalizes common LLM output quirks and attempts to parse a JSON object.
     """
     clean = raw.strip()
 
     # Strip markdown fences
     clean = re.sub(r"^```(?:json)?\s*", "", clean, flags=re.MULTILINE)
     clean = re.sub(r"```\s*$", "", clean, flags=re.MULTILINE)
-    clean = clean.strip()
+    clean = clean.strip("` \n\r")
+
+    # Normalize smart quotes and common JSON mistakes
+    clean = clean.replace("“", '"').replace("”", '"')
+    clean = clean.replace("‘", "'").replace("’", "'")
+    clean = re.sub(r"(?<=[:\[,\{])\s*'([^']*)'", r'"\1"', clean)
+    clean = re.sub(r"(?<=\{|,)\s*([A-Za-z_][A-Za-z0-9_]*)\s*:", r'"\1":', clean)
 
     # Try direct parse first
     try:
@@ -583,8 +587,58 @@ def _parse_json(raw: str) -> dict:
         except json.JSONDecodeError:
             pass
 
-    # Last resort: raise with the cleaned content for logging
+        # Last retry: replace plain single quotes with doubles and re-parse
+        fixed2 = fixed.replace("'", '"')
+        try:
+            return json.loads(fixed2)
+        except json.JSONDecodeError:
+            pass
+
     raise json.JSONDecodeError(f"Could not parse JSON from response", clean, 0)
+
+
+def _fallback_summary(text: str) -> dict:
+    """Fallback to a simpler summary if the structured pipeline cannot produce valid JSON."""
+    prompt = (
+        "Summarize this document in 2-3 sentences. "
+        "Then provide up to 3 short bullet points of the most important findings. "
+        "Finally, provide one sentence describing any risks or implications. "
+        "Output only plain text."
+        f"\n\n{text[:2800]}"
+    )
+    raw = generate_text_completion(prompt, max_tokens=300)
+    if not raw or not raw.strip():
+        return {
+            "purpose": "Summary generation failed after retries.",
+            "key_points": [],
+            "risks_or_implications": ""
+        }
+
+    lines = [line.strip() for line in raw.splitlines() if line.strip()]
+    purpose_lines = []
+    key_points = []
+    risks_lines = []
+    mode = "purpose"
+
+    for line in lines:
+        if line.startswith("-") or line.startswith("*"):
+            mode = "points"
+            key_points.append(line.lstrip("-* ").strip())
+        elif "risk" in line.lower() or "implication" in line.lower():
+            mode = "risks"
+            risks_lines.append(line)
+        elif mode == "purpose":
+            purpose_lines.append(line)
+        elif mode == "points":
+            key_points.append(line)
+        elif mode == "risks":
+            risks_lines.append(line)
+
+    return {
+        "purpose": " ".join(purpose_lines)[:800],
+        "key_points": key_points[:3],
+        "risks_or_implications": " ".join(risks_lines)[:400],
+    }
 
 
 def _summarize_chunk_sync(chunk: dict, total_chunks: int) -> dict:
@@ -663,7 +717,11 @@ def generate_summary(text: str) -> dict:
     prompt = _reduce_prompt(chunk_results, filename="document")
     for attempt in range(2):
         try:
-            raw = generate_text_completion(prompt, max_tokens=_REDUCE_MAX_TOKENS)
+            raw = generate_text_completion(
+                prompt,
+                max_tokens=_REDUCE_MAX_TOKENS,
+                response_mime_type="application/json"
+            )
             result = _parse_json(raw)
             return {
                 "purpose":               result.get("purpose", ""),
@@ -679,11 +737,7 @@ def generate_summary(text: str) -> dict:
                 )
             else:
                 logger.error("Consolidation repair pass also failed.")
-                return {
-                    "purpose": "Summary generation failed after retries.",
-                    "key_points": [],
-                    "risks_or_implications": ""
-                }
+                return _fallback_summary(clean)
 
 
 # -------------------------
