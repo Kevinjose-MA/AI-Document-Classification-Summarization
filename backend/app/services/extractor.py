@@ -20,6 +20,32 @@ from app.services.llm import generate_text_completion
 
 logger = logging.getLogger(__name__)
 
+# Lazy OCR engine handles to avoid heavy initialization at import time
+EASYOCR_READER = None
+PADDLE_OCR = None
+
+
+def _get_easyocr_reader():
+    global EASYOCR_READER
+    try:
+        if EASYOCR_READER is None:
+            import easyocr
+            EASYOCR_READER = easyocr.Reader(["en"], gpu=False)
+        return EASYOCR_READER
+    except Exception:
+        return None
+
+
+def _get_paddle_ocr():
+    global PADDLE_OCR
+    try:
+        if PADDLE_OCR is None:
+            from paddleocr import PaddleOCR
+            PADDLE_OCR = PaddleOCR(use_angle_cls=True, lang="en")
+        return PADDLE_OCR
+    except Exception:
+        return None
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Pipeline constants
 # ─────────────────────────────────────────────────────────────────────────────
@@ -200,37 +226,120 @@ def _ocr_fallback_engines(pil_img: Image.Image) -> dict:
     Returns dict: {"text": str, "confidence": float, "warnings": [str], "sources": [engine names]}"""
     results = []
 
-    # EasyOCR
-    try:
-        import easyocr
-        reader = easyocr.Reader(["en"], gpu=False)
-        arr = np.array(pil_img.convert("RGB"))
-        raw = reader.readtext(arr)
-        text = "\n".join([t[1] for t in raw if t[1].strip()])
-        confs = [t[2] for t in raw if isinstance(t[2], (int, float))]
-        conf = float(np.mean(confs)) if confs else 0.0
-        results.append(("easyocr", text, conf))
-    except Exception as e:
-        logger.info(f"EasyOCR not available or failed: {e}")
+    # Table-aware extraction: attempt to detect table structures and extract cells
+    def _extract_table_from_image(pil_img: Image.Image):
+        try:
+            arr = cv2.cvtColor(np.array(pil_img.convert("RGB")), cv2.COLOR_RGB2GRAY)
+            # adaptive threshold to get binary image
+            th = cv2.adaptiveThreshold(arr, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 15, 8)
+            inv = 255 - th
 
-    # PaddleOCR
+            # Detect horizontal and vertical lines
+            cols = inv.shape[1]
+            horizontal_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (max(10, cols // 15), 1))
+            detect_horizontal = cv2.erode(inv, horizontal_kernel, iterations=1)
+            detect_horizontal = cv2.dilate(detect_horizontal, horizontal_kernel, iterations=1)
+
+            rows = inv.shape[0]
+            vertical_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, max(10, rows // 15)))
+            detect_vertical = cv2.erode(inv, vertical_kernel, iterations=1)
+            detect_vertical = cv2.dilate(detect_vertical, vertical_kernel, iterations=1)
+
+            table_mask = cv2.add(detect_horizontal, detect_vertical)
+            # Find contours for cells
+            contours, _ = cv2.findContours(table_mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+            boxes = [cv2.boundingRect(c) for c in contours]
+            # Filter small boxes
+            boxes = [b for b in boxes if b[2] > 20 and b[3] > 10]
+            if len(boxes) < 4:
+                return None
+
+            # Sort boxes by y then x
+            boxes = sorted(boxes, key=lambda x: (x[1], x[0]))
+
+            # Group into rows by y proximity
+            rows_grouped = []
+            current_row = []
+            last_y = None
+            for b in boxes:
+                x, y, w, h = b
+                if last_y is None:
+                    current_row = [b]
+                    last_y = y
+                elif abs(y - last_y) < max(10, h // 2):
+                    current_row.append(b)
+                    last_y = int((last_y + y) / 2)
+                else:
+                    rows_grouped.append(sorted(current_row, key=lambda r: r[0]))
+                    current_row = [b]
+                    last_y = y
+            if current_row:
+                rows_grouped.append(sorted(current_row, key=lambda r: r[0]))
+
+            # OCR each cell with Tesseract (fast) and assemble CSV
+            table_rows = []
+            for r in rows_grouped:
+                cells = []
+                for (x, y, w, h) in r:
+                    crop = arr[y:y+h, x:x+w]
+                    # small pad
+                    pad = 2
+                    yh = max(0, y - pad); yb = min(arr.shape[0], y + h + pad)
+                    xl = max(0, x - pad); xr = min(arr.shape[1], x + w + pad)
+                    crop = arr[yh:yb, xl:xr]
+                    txt = pytesseract.image_to_string(crop, lang="eng", config='--psm 6')
+                    txt = txt.replace("\n", " ").strip()
+                    cells.append(txt)
+                table_rows.append(cells)
+
+            # Convert to CSV-like string
+            lines = [",".join(["\"" + c.replace('"', '""') + "\"" for c in row]) for row in table_rows]
+            csv_text = "\n".join(lines)
+            return {"csv": csv_text, "rows": table_rows, "cells": sum(len(r) for r in table_rows)}
+        except Exception as e:
+            logger.debug(f"Table extraction failed: {e}")
+            return None
+
+    table_res = _extract_table_from_image(pil_img)
+    if table_res:
+        # If a table is detected with multiple cells, add as a high-confidence result
+        if table_res.get("cells", 0) >= 4:
+            results.append(("table", table_res.get("csv", ""), 0.9))
+
+    # EasyOCR (lazy)
     try:
-        from paddleocr import PaddleOCR
-        ocr = PaddleOCR(use_angle_cls=True, lang="en")
-        arr = np.array(pil_img.convert("RGB"))
-        raw = ocr.ocr(arr, cls=True)
-        texts = []
-        confs = []
-        for line in raw:
-            for seg in line:
-                txt = seg[1][0]
-                confs.append(float(seg[1][1]))
-                texts.append(txt)
-        text = "\n".join(t for t in texts if t.strip())
-        conf = float(np.mean(confs)) if confs else 0.0
-        results.append(("paddleocr", text, conf))
+        reader = _get_easyocr_reader()
+        if reader:
+            arr = np.array(pil_img.convert("RGB"))
+            raw = reader.readtext(arr)
+            text = "\n".join([t[1] for t in raw if t[1].strip()])
+            confs = [t[2] for t in raw if isinstance(t[2], (int, float))]
+            conf = float(np.mean(confs)) if confs else 0.0
+            results.append(("easyocr", text, conf))
     except Exception as e:
-        logger.info(f"PaddleOCR not available or failed: {e}")
+        logger.info(f"EasyOCR failed at runtime: {e}")
+
+    # PaddleOCR (lazy)
+    try:
+        ocr = _get_paddle_ocr()
+        if ocr:
+            arr = np.array(pil_img.convert("RGB"))
+            raw = ocr.ocr(arr, cls=True)
+            texts = []
+            confs = []
+            for line in raw:
+                for seg in line:
+                    txt = seg[1][0]
+                    try:
+                        confs.append(float(seg[1][1]))
+                    except Exception:
+                        pass
+                    texts.append(txt)
+            text = "\n".join(t for t in texts if t.strip())
+            conf = float(np.mean(confs)) if confs else 0.0
+            results.append(("paddleocr", text, conf))
+    except Exception as e:
+        logger.info(f"PaddleOCR failed at runtime: {e}")
 
     # Tesseract (pytesseract)
     try:

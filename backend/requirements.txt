@@ -8,13 +8,13 @@ torch==2.9.1+cpu
 
 pymupdf==1.24.9
 pikepdf==9.0.0
-pillow==10.4.0
+Pillow==10.4.0
 pytesseract==0.3.10
-easyocr==1.6.2
-paddleocr==2.6.1
-opencv-python-headless==4.7.0.72
-scikit-image==0.21.0
-numpy==1.25.2
+# Optional: EasyOCR (only install if necessary for scene-text). Omit by default to reduce memory.
+# easyocr==1.7.1
+paddleocr==2.8.1
+opencv-python-headless==4.10.0.84
+numpy==1.26.4
 
 faiss-cpu==1.12.0
 
