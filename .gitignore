@@ -4,3 +4,6 @@ __pycache__/
 node_modules/ 
 .env 
 .DS_Store 
+qa_cache.json
+clause_cache/
+faiss_cache/

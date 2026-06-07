@@ -1,5 +1,5 @@
 // context/AuthContext.jsx
-import { createContext, useContext, useState, useEffect } from "react";
+import { createContext, useContext, useState } from "react";
 
 const Ctx = createContext(null);
 
@@ -9,12 +9,10 @@ const decode = (token) => {
 };
 
 export function AuthProvider({ children }) {
-  const [user, setUser] = useState(null);
-
-  useEffect(() => {
+  const [user, setUser] = useState(() => {
     const t = localStorage.getItem("token");
-    if (t) { const p = decode(t); if (p) setUser(p); }
-  }, []);
+    return t ? decode(t) : null;
+  });
 
   const login  = (token) => { localStorage.setItem("token", token); const p = decode(token); if (p) setUser(p); };
   const logout = () => { localStorage.removeItem("token"); setUser(null); };

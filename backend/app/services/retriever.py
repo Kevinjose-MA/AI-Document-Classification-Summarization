@@ -2,7 +2,7 @@ import json
 import os
 import faiss
 import numpy as np
-from sentence_transformers import SentenceTransformer
+from app.services.embeddings import encode_texts
 
 # Paths for storage
 CLAUSE_FILE = "app/data/clauses.json"
@@ -10,7 +10,6 @@ INDEX_FILE = "app/data/faiss.index"
 
 class ClauseRetriever:
     def __init__(self):
-        self.model = SentenceTransformer("all-MiniLM-L6-v2")
         self.clauses = self._load_clauses()
         self.index, _ = self._load_or_build_index()
 
@@ -48,7 +47,7 @@ class ClauseRetriever:
                 print(f"⚠️ Failed to load FAISS index from disk: {e}. Rebuilding...")
 
         # Build new index
-        embeddings = self.model.encode(texts, convert_to_numpy=True).astype("float32")
+        embeddings = encode_texts(texts, convert_to_numpy=True).astype("float32")
         dim = embeddings.shape[1]
         index = faiss.IndexFlatL2(dim)
         index.add(embeddings)
@@ -72,7 +71,7 @@ class ClauseRetriever:
 
         query = query.strip().lower()
         query_embedding = np.array(
-            self.model.encode([query], convert_to_numpy=True), dtype=np.float32
+            encode_texts([query], convert_to_numpy=True), dtype=np.float32
         )
         D, I = self.index.search(query_embedding, top_k)
 
@@ -83,5 +82,5 @@ class ClauseRetriever:
         Perform a warmup to load the model into memory.
         """
         print("🚀 Warming up embedding model...")
-        _ = self.model.encode(["warmup query"], convert_to_numpy=True)
+        _ = encode_texts(["warmup query"], convert_to_numpy=True)
         print("✅ Model warmup complete.")

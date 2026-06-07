@@ -6,8 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.services.extractor import extract_clauses
 from app.api.ingestion_sources import router as ingestion_router
 from app.services.parser import extract_dynamic_keywords_from_clauses, parse_query_with_dynamic_map
-from sentence_transformers import SentenceTransformer
-from transformers import AutoTokenizer
+from app.services.embeddings import count_tokens, encode_texts
 import faiss
 import numpy as np
 import google.generativeai as genai
@@ -44,7 +43,6 @@ init_db()
 # Load env vars
 load_dotenv()
 api_key = os.getenv("GEMINI_API")
-genai.configure(api_key=api_key)
 
 # FastAPI app
 app = FastAPI()
@@ -63,11 +61,20 @@ app.include_router(documents_router, prefix="/api/v1", tags=["Documents"])
 app.include_router(ingestion_router, prefix="/api/v1")
 
 # Embedding model and tokenizer
-model = SentenceTransformer("sentence-transformers/all-MiniLM-L12-v2")
-tokenizer = AutoTokenizer.from_pretrained("sentence-transformers/all-MiniLM-L12-v2")
-genai_model = genai.GenerativeModel("models/gemini-2.5-flash")
+genai_model = None
+
+
+def get_genai_model():
+    global genai_model
+    if genai_model is None:
+        if not api_key:
+            raise ValueError("GEMINI_API key not set in environment")
+        genai.configure(api_key=api_key)
+        genai_model = genai.GenerativeModel("models/gemini-2.5-flash")
+    return genai_model
 
 QA_CACHE_FILE = "qa_cache.json"
+FAISS_CACHE_DIR = Path("faiss_cache")
 qa_cache = {}
 if os.path.exists(QA_CACHE_FILE):
     with open(QA_CACHE_FILE, "r", encoding="utf-8") as f:
@@ -205,12 +212,61 @@ def extract_section_from_clause(clause_text):
     return "Unknown"
 
 
+def normalize_clause_items(raw_clauses: List) -> List[Dict[str, str]]:
+    valid_clauses = []
+    for item in raw_clauses:
+        if isinstance(item, dict):
+            clause_text = item.get("clause", "").strip()
+            section = item.get("section") or extract_section_from_clause(clause_text)
+            tags = item.get("tags") or extract_tags(clause_text)
+        elif isinstance(item, str):
+            clause_text = item.strip()
+            section = extract_section_from_clause(clause_text)
+            tags = extract_tags(clause_text)
+        else:
+            continue
+
+        if clause_text:
+            valid_clauses.append({
+                "clause": clause_text,
+                "section": section,
+                "tags": tags,
+            })
+    return valid_clauses
+
+
 def build_faiss_index(clauses: List[Dict]) -> tuple:
     texts = [c["clause"] for c in clauses]
-    vectors = model.encode(texts)
+    vectors = encode_texts(texts)
     index = faiss.IndexFlatL2(vectors.shape[1])
     index.add(np.array(vectors).astype(np.float32))
     return index, texts
+
+
+def load_or_build_faiss_index(cache_key: str, clauses: List[Dict]) -> tuple:
+    FAISS_CACHE_DIR.mkdir(exist_ok=True)
+    index_path = FAISS_CACHE_DIR / f"{cache_key}.index"
+    clauses_path = FAISS_CACHE_DIR / f"{cache_key}.clauses.json"
+
+    if index_path.exists() and clauses_path.exists():
+        try:
+            index = faiss.read_index(str(index_path))
+            with clauses_path.open("r", encoding="utf-8") as f:
+                cached_clauses = normalize_clause_items(json.load(f))
+            if cached_clauses and index.ntotal == len(cached_clauses):
+                return index, cached_clauses
+        except Exception as e:
+            logger.warning(f"[FAISS] Failed to load persisted index {cache_key}: {e}. Rebuilding.")
+
+    valid_clauses = normalize_clause_items(clauses)
+    if not valid_clauses:
+        raise ValueError("No valid clauses available for FAISS indexing")
+
+    index, _ = build_faiss_index(valid_clauses)
+    faiss.write_index(index, str(index_path))
+    with clauses_path.open("w", encoding="utf-8") as f:
+        json.dump(valid_clauses, f, ensure_ascii=False)
+    return index, valid_clauses
 
 
 def trim_clauses(clauses: List[Dict[str, str]], max_tokens: int = 2000) -> List[Dict[str, str]]:
@@ -218,7 +274,7 @@ def trim_clauses(clauses: List[Dict[str, str]], max_tokens: int = 2000) -> List[
     total = 0
     for clause_obj in clauses:
         clause = clause_obj["clause"]
-        tokens = len(tokenizer.tokenize(clause))
+        tokens = count_tokens(clause)
         if total + tokens > max_tokens:
             break
         result.append({"clause": clause})
@@ -240,7 +296,7 @@ def split_compound_question(question: str) -> List[str]:
 
 
 def get_top_clauses(question: str, index, clause_texts: List[str]) -> List[str]:
-    question_embedding = model.encode([question])
+    question_embedding = encode_texts([question])
     _, indices = index.search(np.array(question_embedding).astype(np.float32), k=50)
     top_faiss_clauses = [clause_texts[i] for i in indices[0]]
 
@@ -275,7 +331,7 @@ async def retrieve_clauses_parallel(questions, index, clause_texts):
 
     def process(q):
         MIN_SIMILARITY = 0.50
-        question_embedding = model.encode([q], convert_to_numpy=True)
+        question_embedding = encode_texts([q], convert_to_numpy=True)
         D, I = index.search(np.array(question_embedding).astype(np.float32), k=50)
         faiss_matches = []
         for idx, dist in zip(I[0], D[0]):
@@ -394,7 +450,7 @@ Question-Clause Mapping:
 async def call_llm(prompt: str, offset: int, batch_size: int) -> Dict[str, Dict[str, str]]:
     try:
         response = await asyncio.to_thread(
-            genai_model.generate_content,
+            get_genai_model().generate_content,
             contents=[{"role": "user", "parts": [prompt]}],
             generation_config={"response_mime_type": "application/json"},
         )
@@ -601,15 +657,16 @@ async def hackrx_run(req: HackRxRequest):
     # ── Build / load FAISS index ──────────────────────────────────────────────
     dynamic_keyword_map = extract_dynamic_keywords_from_clauses(all_clauses)
 
-    url0_hash = url_hash(doc_urls[0])
-    if url0_hash in app.state.cache_indices:
-        index = app.state.cache_indices[url0_hash]["index"]
-        clause_texts = app.state.cache_indices[url0_hash]["clauses"]
+    cache_key = url_hash("|".join(sorted(doc_urls)))
+    if not hasattr(app.state, "cache_indices"):
+        app.state.cache_indices = {}
+
+    if cache_key in app.state.cache_indices:
+        index = app.state.cache_indices[cache_key]["index"]
+        clause_texts = app.state.cache_indices[cache_key]["clauses"]
     else:
-        valid_clauses = [c for c in all_clauses if c.get("clause", "").strip()]
-        clause_texts = valid_clauses
-        index, _ = build_faiss_index(valid_clauses)
-        app.state.cache_indices[url0_hash] = {"index": index, "clauses": valid_clauses}
+        index, clause_texts = load_or_build_faiss_index(cache_key, all_clauses)
+        app.state.cache_indices[cache_key] = {"index": index, "clauses": clause_texts}
 
     # ── Question splitting + cache lookup ─────────────────────────────────────
     split_questions = []
@@ -671,123 +728,31 @@ async def hackrx_run(req: HackRxRequest):
 @app.on_event("startup")
 async def warmup_model():
     logger.info("[INGEST] Application startup triggered")
-    logger.info("[INGEST] Intelligence warmup started")
-
     app.state.cache_indices = {}
+    os.makedirs("clause_cache", exist_ok=True)
+    FAISS_CACHE_DIR.mkdir(exist_ok=True)
 
-    clause_dir = "clause_cache"
-    os.makedirs(clause_dir, exist_ok=True)
-
-    for filename in os.listdir(clause_dir):
-        if not filename.endswith(".json"):
-            continue
-        path = os.path.join(clause_dir, filename)
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                raw_clauses = json.load(f)
-        except Exception:
-            logger.error(f"[INGEST] Failed to load clause cache: {filename}")
-            continue
-
-        valid_clauses = []
-        clause_texts = []
-
-        for item in raw_clauses:
-            if isinstance(item, dict):
-                clause_text = item.get("clause", "").strip()
-                section = item.get("section") or extract_section_from_clause(clause_text)
-                tags = item.get("tags") or extract_tags(clause_text)
-            elif isinstance(item, str):
-                clause_text = item.strip()
-                section = extract_section_from_clause(clause_text)
-                tags = extract_tags(clause_text)
-            else:
-                continue
-
-            if clause_text:
-                tokens = len(tokenizer.tokenize(clause_text))
-                if tokens <= 512:
-                    enriched = {"clause": clause_text, "section": section, "tags": tags}
-                    valid_clauses.append(enriched)
-                    clause_texts.append(enriched)
-
-        if not clause_texts:
-            logger.warning(f"[INGEST] No valid clauses found in {filename}")
-            continue
-
-        embeddings = model.encode([c["clause"] for c in clause_texts], show_progress_bar=False)
-        index = faiss.IndexFlatL2(embeddings.shape[1])
-        index.add(np.array(embeddings).astype(np.float32))
-
-        urlhash = filename.replace(".json", "")
-        app.state.cache_indices[urlhash] = {"index": index, "clauses": clause_texts}
-
-        logger.info(f"[INGEST] FAISS index loaded | source=cache | file={filename} | clauses={len(clause_texts)}")
-
-    # ── Auto-connect admin inbox from .env if not already saved ──────────────
-    from app.models.models import EmailCredentialModel, UserModel
-    from app.core.config import EMAIL_USER, EMAIL_PASS
-
-    admin = None
-    cred = None
-
-    if EMAIL_USER and EMAIL_PASS:
-        try:
-            admin = UserModel.objects(role="admin").first()
-            if admin:
-                cred = EmailCredentialModel.objects(user_id=str(admin.id)).first()
-                if not cred:
-                    cred = EmailCredentialModel(
-                        user_id=str(admin.id),
-                        imap_host="imap.gmail.com",
-                        imap_port=993,
-                        email_address=EMAIL_USER,
-                        email_password=EMAIL_PASS,
-                    )
-                    cred.save()
-                    logger.info(f"[INGEST] Admin inbox auto-connected from .env | {EMAIL_USER}")
-                else:
-                    logger.info(f"[INGEST] Admin inbox already connected | {cred.email_address}")
-            else:
-                logger.warning("[INGEST] No admin user found — skipping auto email connect")
-        except Exception as e:
-            logger.error(f"[INGEST] Auto email connect failed: {e}")
-
-    logger.info("[INGEST] Startup warmup completed")
-
-    # ── Auto-trigger ingestion on startup for admin ───────────────────────────
-    
-    if admin and cred:
-        from app.api.documents import fetch_email_attachments_for_user
-        import threading
-
-        thread = threading.Thread(
-            target=fetch_email_attachments_for_user,
-            args=(str(admin.id), cred),
-            daemon=True
-        )
-        thread.start()
-        logger.info(f"[INGEST] Startup email ingestion triggered for {cred.email_address}")
-
-        #Audit Logging
+    if os.getenv("ENABLE_ESCALATION_SCHEDULER", "false").lower() == "true":
         scheduler.add_job(
-        run_escalation_check,
-        trigger="interval",
-        minutes=30,
-        id="escalation_check",
-        replace_existing=True,
-        max_instances=1,        # never run two simultaneously
-    )
-    scheduler.start()
-    import logging
-    logging.getLogger("ESCALATION").info(
-        "Escalation scheduler started — checking every 30 minutes. "
-        f"SLA thresholds: high=2h, medium=24h, low=72h"
-    )
+            run_escalation_check,
+            trigger="interval",
+            minutes=30,
+            id="escalation_check",
+            replace_existing=True,
+            max_instances=1,
+        )
+        scheduler.start()
+        logging.getLogger("ESCALATION").info(
+            "Escalation scheduler started - checking every 30 minutes. "
+            "SLA thresholds: high=2h, medium=24h, low=72h"
+        )
+
+    logger.info("[INGEST] Startup completed without model or FAISS warmup")
 
 @app.on_event("shutdown")
 async def shutdown_event():
-    scheduler.shutdown(wait=False)
+    if scheduler.running:
+        scheduler.shutdown(wait=False)
 
 @app.get("/api/v1/documents/{file_id}/preview")
 def preview_document(file_id: str):

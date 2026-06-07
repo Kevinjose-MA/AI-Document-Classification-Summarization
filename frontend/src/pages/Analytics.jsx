@@ -23,19 +23,20 @@ function BarChart({ data, colorClass = "bg-blue-500" }) {
 function DonutChart({ segments, size = 120 }) {
   const total = segments.reduce((s, x) => s + x.value, 0) || 1;
   const r = 40; const circ = 2 * Math.PI * r;
-  let offset = 0;
+  const segmentsWithOffsets = segments.map((seg, i) => {
+    const prior = segments.slice(0, i).reduce((sum, item) => sum + ((item.value / total) * circ), 0);
+    return { ...seg, dash: (seg.value / total) * circ, offset: prior };
+  });
   return (
     <div className="flex items-center gap-6">
       <svg width={size} height={size} viewBox="0 0 100 100">
         <circle cx="50" cy="50" r={r} fill="none" stroke="#f3f4f6" strokeWidth="14" />
-        {segments.map((seg, i) => {
-          const dash = (seg.value / total) * circ;
-          const el = <circle key={i} cx="50" cy="50" r={r} fill="none" stroke={seg.color}
-            strokeWidth="14" strokeDasharray={`${dash} ${circ - dash}`}
-            strokeDashoffset={-offset} transform="rotate(-90 50 50)"
-            style={{ transition: "stroke-dasharray 0.7s ease" }} />;
-          offset += dash; return el;
-        })}
+        {segmentsWithOffsets.map((seg, i) => (
+          <circle key={i} cx="50" cy="50" r={r} fill="none" stroke={seg.color}
+            strokeWidth="14" strokeDasharray={`${seg.dash} ${circ - seg.dash}`}
+            strokeDashoffset={-seg.offset} transform="rotate(-90 50 50)"
+            style={{ transition: "stroke-dasharray 0.7s ease" }} />
+        ))}
         <text x="50" y="54" textAnchor="middle" fontSize="18" fill="#111827" fontWeight="700">{total}</text>
       </svg>
       <div className="space-y-2">

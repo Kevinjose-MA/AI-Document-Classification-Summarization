@@ -1,6 +1,6 @@
 // src/components/Sidebar.jsx
 import { Link, useLocation } from "react-router-dom";
-import { getUser, isAdmin } from "../utils/auth";
+import { isAdmin } from "../utils/auth";
 
 const NAV = [
   {

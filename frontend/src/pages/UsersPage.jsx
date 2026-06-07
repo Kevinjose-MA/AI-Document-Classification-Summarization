@@ -1,5 +1,5 @@
 // src/pages/UsersPage.jsx
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import api from "../api/axios";
 import { isAdmin } from "../utils/auth";
@@ -106,17 +106,17 @@ export default function UsersPage() {
   const [loading, setLoading] = useState(true);
   const [editUser, setEditUser] = useState(null);
 
-  useEffect(() => {
-    if (!isAdmin()) { navigate("/dashboard"); return; }
-    load();
-  }, []);
-
-  const load = () => {
+  const load = useCallback(() => {
     api.get("/auth/users")
       .then((r) => setUsers(r.data))
       .catch(console.error)
       .finally(() => setLoading(false));
-  };
+  }, []);
+
+  useEffect(() => {
+    if (!isAdmin()) { navigate("/dashboard"); return; }
+    load();
+  }, [load, navigate]);
 
   return (
     <>

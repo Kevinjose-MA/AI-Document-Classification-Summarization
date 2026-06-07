@@ -12,12 +12,18 @@ from app.services.prompts import MISTRAL_SYSTEM_PROMPT_TEMPLATE, build_mistral_p
 # Load environment
 load_dotenv()
 api_key = os.getenv("GEMINI_API")
-if not api_key:
-    raise ValueError("GEMINI_API key not set in .env")
-genai.configure(api_key=api_key)
 
-# Initialize Gemini model
-genai_model = genai.GenerativeModel("models/gemini-2.5-flash")
+genai_model = None
+
+
+def get_genai_model():
+    global genai_model
+    if genai_model is None:
+        if not api_key:
+            raise ValueError("GEMINI_API key not set in environment")
+        genai.configure(api_key=api_key)
+        genai_model = genai.GenerativeModel("models/gemini-2.5-flash")
+    return genai_model
 
 
 def _sanitize_llm_output(raw: str) -> str:
@@ -36,7 +42,7 @@ def query_mistral_with_clauses(question: str, clauses: list) -> dict:
     prompt = build_mistral_prompt(question, clauses)
 
     try:
-        response = genai_model.generate_content(
+        response = get_genai_model().generate_content(
             contents=[{"role": "user", "parts": [prompt]}],
             generation_config={
                 "temperature": 0.2,
@@ -67,7 +73,7 @@ def query_mistral_batch(questions: list, clauses: list) -> dict:
     prompt = build_batch_prompt(questions, clauses)
 
     try:
-        response = genai_model.generate_content(
+        response = get_genai_model().generate_content(
             contents=[{"role": "user", "parts": [prompt]}],
             generation_config={
                 "temperature": 0.2,
@@ -101,7 +107,7 @@ async def warmup_llm():
         }
         """
         response = await asyncio.to_thread(
-            genai_model.generate_content,
+            get_genai_model().generate_content,
             contents=[{"role": "user", "parts": [prompt]}],
             generation_config={"response_mime_type": "application/json"},
         )
@@ -118,7 +124,7 @@ async def call_llm_batch(prompts: List[str]) -> Dict[str, Dict[str, str]]:
     for offset, prompt in enumerate(prompts):
         try:
             response = await asyncio.to_thread(
-                genai_model.generate_content,
+                get_genai_model().generate_content,
                 contents=[{"role": "user", "parts": [prompt]}],
                 generation_config={"response_mime_type": "application/json"},
             )
@@ -174,7 +180,7 @@ def generate_text_completion(
         else:
             contents = [{"role": "user", "parts": [prompt]}]
 
-        response = genai_model.generate_content(
+        response = get_genai_model().generate_content(
             contents=contents,
             generation_config={
                 "temperature": 0.1,

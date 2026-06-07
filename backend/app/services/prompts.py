@@ -1,7 +1,4 @@
-from transformers import AutoTokenizer
-
-# Load tokenizer globally (used for token count trimming)
-tokenizer = AutoTokenizer.from_pretrained("sentence-transformers/all-MiniLM-L6-v2")
+from app.services.embeddings import count_tokens
 
 # --------------------------------------
 # 🔹 TEMPLATE for Single-Question Prompt
@@ -50,7 +47,7 @@ def _trim_clauses(clauses: list, max_tokens: int) -> str:
         clause = clause_obj.get("clause", "").strip()
         if not clause:
             continue
-        tokens = len(tokenizer.tokenize(clause))
+        tokens = count_tokens(clause)
         if total_tokens + tokens > max_tokens:
             break
         trimmed.append(clause)
