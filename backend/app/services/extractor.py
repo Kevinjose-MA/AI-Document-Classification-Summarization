@@ -606,13 +606,11 @@ def _fallback_summary(text: str) -> dict:
         "Output only plain text."
         f"\n\n{text[:2800]}"
     )
+
     raw = generate_text_completion(prompt, max_tokens=300)
     if not raw or not raw.strip():
-        return {
-            "purpose": "Summary generation failed after retries.",
-            "key_points": [],
-            "risks_or_implications": ""
-        }
+        logger.warning("Fallback summary response was empty; using deterministic text heuristic.")
+        return _simple_text_summary(text)
 
     lines = [line.strip() for line in raw.splitlines() if line.strip()]
     purpose_lines = []
@@ -634,10 +632,43 @@ def _fallback_summary(text: str) -> dict:
         elif mode == "risks":
             risks_lines.append(line)
 
+    if not purpose_lines and not key_points and not risks_lines:
+        logger.warning("Fallback summary could not parse plain text response; using deterministic fallback.")
+        return _simple_text_summary(text)
+
     return {
         "purpose": " ".join(purpose_lines)[:800],
         "key_points": key_points[:3],
         "risks_or_implications": " ".join(risks_lines)[:400],
+    }
+
+
+def _simple_text_summary(text: str) -> dict:
+    """Deterministic fallback summary when the LLM response is empty or cannot be parsed."""
+    clean = re.sub(r"\s+", " ", text or "").strip()
+    if not clean:
+        return {
+            "purpose": "Unable to generate a summary from the available text.",
+            "key_points": [],
+            "risks_or_implications": ""
+        }
+
+    sentences = re.split(r'(?<=[.!?])\s+', clean)
+    purpose = " ".join(sentences[:2]).strip() or clean[:800]
+
+    keywords = ["risk", "obligation", "liability", "confidential", "payment", "deadline", "requirement"]
+    key_points = [s.strip() for s in sentences if any(k in s.lower() for k in keywords)][:3]
+    if not key_points:
+        key_points = [s.strip() for s in sentences[1:4] if s.strip()][:3]
+
+    risks = next((s.strip() for s in sentences if any(k in s.lower() for k in ["risk", "implication", "liability", "obligation", "concern", "issue"])), "")
+    if not risks and len(sentences) > 2:
+        risks = sentences[2].strip()
+
+    return {
+        "purpose": purpose[:800],
+        "key_points": key_points[:3],
+        "risks_or_implications": risks[:400],
     }
 
 
