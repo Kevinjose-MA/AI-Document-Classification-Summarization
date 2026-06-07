@@ -209,6 +209,8 @@ def ingest_file(file_bytes: bytes, filename: str, user_id: str, purpose: str,
         risk_level         = metadata.get("risk_level"),
         language           = metadata.get("language"),
         confidence         = str(metadata.get("confidence", "")),
+        ocr_text           = metadata.get("ocr_text", ""),
+        visual_only        = bool(metadata.get("visual_only", False)),
     )
     doc.save()
     logger.info(f"[INGEST] Saved to MongoDB | doc_id={doc.id}")

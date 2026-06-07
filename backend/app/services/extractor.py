@@ -129,6 +129,30 @@ def extract_text_from_eml(file_bytes: bytes) -> str:
 # Text extraction from image
 # -------------------------
 
+def _assess_ocr_confidence(text: str) -> float:
+    """Estimate confidence for OCR output using text length and character entropy."""
+    text = (text or "").strip()
+    if len(text) < 30:
+        return 0.0
+    entropy = _char_entropy(text)
+    if len(text) > 300 and entropy > 3.5:
+        return 0.9
+    if len(text) > 140 and entropy > 3.0:
+        return 0.75
+    if len(text) > 80 and entropy > 2.5:
+        return 0.55
+    return 0.35
+
+
+def _extract_text_from_image(file_bytes: bytes) -> str:
+    try:
+        pil_img = Image.open(BytesIO(file_bytes))
+        ocr_text = pytesseract.image_to_string(pil_img, lang="eng")
+        return _clean_extracted_text(ocr_text)
+    except Exception:
+        return ""
+
+
 def _summarize_image_with_vision(file_bytes: bytes, filename: str) -> dict:
     """
     Uses Claude vision to extract and summarize image content directly.
@@ -136,6 +160,10 @@ def _summarize_image_with_vision(file_bytes: bytes, filename: str) -> dict:
     Tesseract would struggle with. Returns the same dict shape as generate_summary.
     """
     import base64
+
+    ocr_text = _extract_text_from_image(file_bytes)
+    ocr_confidence = _assess_ocr_confidence(ocr_text)
+    visual_only = not bool(ocr_text.strip())
 
     # Detect mime type from image header bytes
     mime = "image/png"
@@ -151,7 +179,7 @@ def _summarize_image_with_vision(file_bytes: bytes, filename: str) -> dict:
     b64 = base64.standard_b64encode(file_bytes).decode("utf-8")
 
     prompt = (
-        "Analyze this image thoroughly.\n\n"
+        "Analyze this image carefully and extract meaning from text, layout, and visible content.\n\n"
         "Return a JSON object with these exact keys:\n"
         "{\n"
         '  "purpose": "2-4 sentences describing what this image shows and its intent",\n'
@@ -171,29 +199,38 @@ def _summarize_image_with_vision(file_bytes: bytes, filename: str) -> dict:
         )
         if raw and raw.strip():
             result = _parse_json(raw)
-            return {
+            summary = {
                 "purpose":               result.get("purpose", ""),
                 "key_points":            result.get("key_points", []),
                 "risks_or_implications": result.get("risks_or_implications", ""),
+                "image_type":            result.get("image_type", "other"),
+                "ocr_text":              ocr_text,
+                "ocr_confidence":        ocr_confidence,
+                "visual_only":           visual_only,
             }
+            if ocr_confidence < 0.5 and ocr_text.strip():
+                summary["data_quality_notes"] = "Low-confidence OCR extraction. Some text may require manual verification."
+            return summary
         raise ValueError("Empty response from vision model")
     except Exception as e:
         logger.warning(f"Vision API failed for {filename}: {e}. Falling back to OCR.")
-        # OCR fallback — extract text then summarize as text document
-        try:
-            from PIL import Image
-            pil_img = Image.open(BytesIO(file_bytes))
-            ocr_text = pytesseract.image_to_string(pil_img, lang="eng")
-            ocr_text = _clean_extracted_text(ocr_text)
-            if len(ocr_text.strip()) > 30:
-                logger.info(f"OCR extracted {len(ocr_text)} chars from {filename}")
-                return generate_summary(ocr_text)
-        except Exception as ocr_err:
-            logger.error(f"OCR fallback also failed for {filename}: {ocr_err}")
+        if ocr_text.strip():
+            logger.info(f"OCR extracted {len(ocr_text)} chars from {filename}")
+            fallback_summary = generate_summary(ocr_text)
+            fallback_summary["ocr_text"] = ocr_text
+            fallback_summary["ocr_confidence"] = ocr_confidence
+            fallback_summary["visual_only"] = visual_only
+            if ocr_confidence < 0.5:
+                fallback_summary["data_quality_notes"] = "Low-confidence OCR extraction. Some text may require manual verification."
+            return fallback_summary
+        logger.error(f"OCR fallback also failed for {filename}: no meaningful text extracted")
         return {
-            "purpose": "Image content extracted via OCR. Manual review recommended.",
+            "purpose": "This image contains visual content with no reliably extracted text.",
             "key_points": [],
             "risks_or_implications": "",
+            "ocr_text": "",
+            "ocr_confidence": 0.0,
+            "visual_only": True,
         }
 
 
@@ -807,14 +844,17 @@ def extract_clauses_from_bytes(file_bytes: bytes, filename: str, enrich=True, em
     elif ext == ".eml":
         raw_text = extract_text_from_eml(file_bytes)
     elif ext in [".png", ".jpg", ".jpeg"]:
-        # Images handled entirely via vision — skip text pipeline
+        # Images handled via vision + OCR extraction before document indexing.
         if enrich:
             vision_summary = _summarize_image_with_vision(file_bytes, filename)
-            sensitivity  = "medium"
-            confidence   = 0.7 if vision_summary.get("purpose") and "could not" not in vision_summary.get("purpose","") else 0.4
-            dept         = "general"
+            ocr_text = vision_summary.get("ocr_text", "") or ""
+            has_text = len(ocr_text.strip()) > 30
+            clauses = split_into_clauses(ocr_text) if has_text else []
+            sensitivity = "medium"
+            confidence = 0.7 if vision_summary.get("purpose") and "could not" not in vision_summary.get("purpose", "") else 0.4
+            dept = "general"
             return {
-                "clauses": [],
+                "clauses": clauses,
                 "metadata": {
                     "summary":        vision_summary,
                     "department":     dept,
@@ -824,6 +864,8 @@ def extract_clauses_from_bytes(file_bytes: bytes, filename: str, enrich=True, em
                     "document_type":  "image",
                     "risk_level":     "low",
                     "language":       "unknown",
+                    "ocr_text":       ocr_text,
+                    "visual_only":    vision_summary.get("visual_only", not has_text),
                 }
             }
         return {"clauses": [], "metadata": {}}

@@ -77,6 +77,8 @@ class DocumentModel(Document):
     risk_level    = StringField(default=None)
     language      = StringField(default=None)
     confidence    = StringField(default=None)
+    ocr_text      = StringField(default="")
+    visual_only   = BooleanField(default=False)
 
     # Audit / escalation
     escalated_at  = DateTimeField(default=None)

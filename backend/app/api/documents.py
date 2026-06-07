@@ -5,16 +5,23 @@ import email
 from email import policy
 from email.header import decode_header
 from datetime import datetime
+from typing import List, Optional
+
 from fastapi import APIRouter, UploadFile, File, Depends, BackgroundTasks, HTTPException
 from fastapi.security import HTTPBearer
 from fastapi.responses import Response
 import jwt
 from bson import ObjectId
+import faiss
+import numpy as np
+from pydantic import BaseModel
 
 from app.models.models import DocumentModel, EmailCredentialModel, AuditLogModel
 from app.services.ingestion import ingest_upload, ingest_bytes
 from app.services import storage as gridfs_storage
 from app.services import blob_storage
+from app.services.embeddings import encode_texts
+from app.services.llm import generate_text_completion
 from app.core.config import SECRET_KEY
 from app.core.encryption import encrypt_password
 
@@ -22,6 +29,135 @@ router    = APIRouter()
 security  = HTTPBearer()
 
 SUPPORTED_EXTS = {".pdf", ".docx", ".doc", ".xlsx", ".xls", ".png", ".jpg", ".jpeg"}
+
+
+class DocumentChatRequest(BaseModel):
+    document_ids: Optional[List[str]] = None
+    questions: List[str]
+    top_k: int = 5
+    include_ocr: bool = True
+
+
+def _query_user_documents(user, document_ids=None):
+    from mongoengine.queryset.visitor import Q
+
+    role = user["role"].lower()
+    if role == "admin":
+        qs = DocumentModel.objects()
+    elif role in ("engineering", "finance", "legal", "hr", "operations", "compliance", "general"):
+        qs = DocumentModel.objects(Q(user_id=str(user["user_id"])) | Q(department=role))
+    else:
+        qs = DocumentModel.objects(user_id=str(user["user_id"]))
+
+    if document_ids:
+        qs = qs.filter(id__in=document_ids)
+    return list(qs)
+
+
+def _prepare_chat_context(documents, include_ocr: bool):
+    entries = []
+    seen = set()
+    for doc in documents:
+        filename = getattr(doc, "filename", "unknown") or "unknown"
+        doc_id = str(getattr(doc, "id", ""))
+
+        for clause in getattr(doc, "clauses", []) or []:
+            text = str(clause.get("clause", "")).strip()
+            if not text:
+                continue
+            key = (doc_id, text[:200])
+            if key in seen:
+                continue
+            seen.add(key)
+            entries.append({
+                "document_id": doc_id,
+                "filename": filename,
+                "kind": "clause",
+                "text": text,
+            })
+
+        if include_ocr:
+            ocr_text = str(getattr(doc, "ocr_text", "") or "").strip()
+            if ocr_text:
+                key = (doc_id, ocr_text[:200])
+                if key not in seen:
+                    seen.add(key)
+                    entries.append({
+                        "document_id": doc_id,
+                        "filename": filename,
+                        "kind": "ocr_text",
+                        "text": ocr_text,
+                    })
+
+        summary_text = None
+        summary_obj = getattr(doc, "summary", None)
+        if isinstance(summary_obj, dict):
+            summary_text = " ".join(
+                filter(None, [
+                    str(summary_obj.get("purpose", "")).strip(),
+                    " ".join(summary_obj.get("key_points", [])),
+                    str(summary_obj.get("risks_or_implications", "")).strip(),
+                ])
+            ).strip()
+        elif summary_obj:
+            summary_text = str(summary_obj).strip()
+
+        if summary_text:
+            key = (doc_id, summary_text[:200])
+            if key not in seen:
+                seen.add(key)
+                entries.append({
+                    "document_id": doc_id,
+                    "filename": filename,
+                    "kind": "summary",
+                    "text": summary_text,
+                })
+
+    return entries
+
+
+def _search_relevant_contexts(question: str, entries: list, top_k: int = 5):
+    if not entries:
+        return []
+
+    texts = [entry["text"] for entry in entries]
+    embeddings = np.asarray(encode_texts(texts, convert_to_numpy=True), dtype=np.float32)
+    if embeddings.size == 0:
+        return []
+
+    query_embedding = np.asarray(encode_texts([question], convert_to_numpy=True), dtype=np.float32)
+    dim = embeddings.shape[1]
+    index = faiss.IndexFlatL2(dim)
+    index.add(embeddings)
+    k = min(top_k, len(entries))
+    distances, indices = index.search(query_embedding, k)
+
+    selected = []
+    for idx in indices[0]:
+        if idx is None or idx < 0 or idx >= len(entries):
+            continue
+        selected.append(entries[idx])
+    return selected
+
+
+def _build_chat_prompt(question: str, contexts: list):
+    snippets = []
+    for entry in contexts:
+        text = entry["text"].strip()
+        if len(text) > 1200:
+            text = text[:1200].rsplit(" ", 1)[0] + "..."
+        snippets.append(
+            f"[Document: {entry['filename']} | Source: {entry['kind']} | DocID: {entry['document_id']}]\n{text}"
+        )
+    context_block = "\n\n".join(snippets)
+
+    return (
+        "You are a secure document assistant. Use only the provided document excerpts and OCR text to answer the question. "
+        "Do not hallucinate or invent facts. If the answer cannot be found in the provided context, say so clearly.\n\n"
+        f"CONTEXT:\n{context_block}\n\n"
+        f"QUESTION:\n{question}\n\n"
+        "Answer concisely and cite the relevant document filename when appropriate."
+    )
 
 
 # ── Auth ───────────────────────────────────────────────────────────────────────
@@ -157,12 +293,45 @@ async def get_document(doc_id: str, user=Depends(get_current_user)):
         "document_type":     getattr(doc, "document_type", None),
         "risk_level":        getattr(doc, "risk_level", None),
         "language":          getattr(doc, "language", None),
+        "ocr_text":          getattr(doc, "ocr_text", ""),
+        "visual_only":       getattr(doc, "visual_only", False),
         "confidence":        getattr(doc, "confidence", None),
         "encrypted_external": doc.encrypted_external,
         "file_id":           doc.file_id,
         "file_url":          getattr(doc, "file_url", None),
         "storage_provider":  getattr(doc, "storage_provider", None),
         "public_id":         getattr(doc, "public_id", None),
+    }
+
+
+@router.post("/documents/chat")
+async def chat_documents(request: DocumentChatRequest, user=Depends(get_current_user)):
+    documents = await asyncio.to_thread(_query_user_documents, user, request.document_ids or None)
+    if not documents:
+        raise HTTPException(404, "No accessible documents found for this request.")
+
+    context_entries = await asyncio.to_thread(_prepare_chat_context, documents, request.include_ocr)
+    if not context_entries:
+        raise HTTPException(404, "No searchable document content found for the requested documents.")
+
+    answers = []
+    sources = []
+    for question in request.questions:
+        contexts = await asyncio.to_thread(_search_relevant_contexts, question, context_entries, request.top_k)
+        if not contexts:
+            answers.append("No relevant document content found for this question.")
+            sources.append([])
+            continue
+
+        prompt = _build_chat_prompt(question, contexts)
+        answer = await asyncio.to_thread(generate_text_completion, prompt, max_tokens=220)
+        answers.append(answer or "No answer could be generated from the selected documents.")
+        sources.append(list({ctx["filename"] for ctx in contexts}))
+
+    return {
+        "answers": answers,
+        "sources": sources,
+        "document_count": len(documents),
     }
 
 
@@ -376,8 +545,6 @@ async def delete_document(doc_id: str, user=Depends(get_current_user)):
 
 
 # ── Email credential management ────────────────────────────────────────────────
-from pydantic import BaseModel
-
 class EmailCredentialSchema(BaseModel):
     imap_host:      str = "imap.gmail.com"
     imap_port:      int = 993
