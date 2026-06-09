@@ -10,12 +10,13 @@ pymupdf==1.24.9
 pikepdf==9.0.0
 Pillow==10.4.0
 pytesseract==0.3.10
+# PaddleOCR suite: CPU-only, Python 3.11 compatible
+numpy==1.26.4
+paddlepaddle==3.1.1
+paddleocr==2.8.1
+opencv-python-headless==4.10.0.84
 # Optional: EasyOCR (only install if necessary for scene-text). Omit by default to reduce memory.
 # easyocr==1.7.1
-paddleocr==2.8.1
-paddlepaddle==2.8.1
-opencv-python-headless==4.10.0.84
-numpy==1.26.4
 
 faiss-cpu==1.12.0
 
@@ -29,7 +30,7 @@ google-generativeai==0.5.4
 
 python-dotenv==1.0.1
 
-# 🔐 Auth (fixed versions for bcrypt issue)
+# Auth (fixed versions for bcrypt issue)
 passlib[bcrypt]==1.7.4
 bcrypt==4.1.2
 pyjwt==2.9.0
