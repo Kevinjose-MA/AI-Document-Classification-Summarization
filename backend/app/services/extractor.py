@@ -164,34 +164,80 @@ def _assess_ocr_confidence(text: str) -> float:
     if len(text) < 30:
         return 0.0
     entropy = _char_entropy(text)
-    if len(text) > 300 and entropy > 3.5:
-        return 0.9
-    if len(text) > 140 and entropy > 3.0:
-        return 0.75
-    if len(text) > 80 and entropy > 2.5:
-        return 0.55
-    return 0.35
+    alpha_ratio = sum(c.isalpha() for c in text) / max(1, len(text))
+    token_count = len(text.split())
+
+    score = 0.0
+    if token_count > 40 and entropy > 2.5 and alpha_ratio > 0.65:
+        score = 0.55
+    if token_count > 80 and entropy > 2.8 and alpha_ratio > 0.68:
+        score = 0.7
+    if token_count > 140 and entropy > 3.0 and alpha_ratio > 0.70:
+        score = 0.78
+    if token_count > 300 and entropy > 3.3 and alpha_ratio > 0.72:
+        score = 0.88
+    if token_count > 500 and entropy > 3.5 and alpha_ratio > 0.75:
+        score = 0.92
+
+    if alpha_ratio < 0.5:
+        score = min(score, 0.45)
+    return round(max(0.0, min(score, 0.99)), 2)
+
+
+def _normalize_pil_image_for_ocr(pil_img: Image.Image) -> Image.Image:
+    """Fix orientation, crop borders and clean scanned document images before OCR."""
+    try:
+        img = np.array(pil_img.convert("RGB"))
+        orig_h, orig_w = img.shape[:2]
+
+        # Detect orientation via Tesseract OSD if available.
+        try:
+            osd = pytesseract.image_to_osd(img)
+            rotation_match = re.search(r"Rotate:\s*(\d+)", osd)
+            if rotation_match:
+                angle = int(rotation_match.group(1))
+                if angle and angle != 0:
+                    logger.debug(f"OCR normalization: rotating image by {angle} degrees")
+                    M = cv2.getRotationMatrix2D((orig_w / 2, orig_h / 2), -angle, 1.0)
+                    img = cv2.warpAffine(img, M, (orig_w, orig_h), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
+        except Exception:
+            pass
+
+        gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+        _, mask = cv2.threshold(gray, 250, 255, cv2.THRESH_BINARY)
+        coords = cv2.findNonZero(255 - mask)
+        if coords is not None:
+            x, y, w, h = cv2.boundingRect(coords)
+            pad = 12
+            x0 = max(0, x - pad)
+            y0 = max(0, y - pad)
+            x1 = min(orig_w, x + w + pad)
+            y1 = min(orig_h, y + h + pad)
+            if x1 - x0 > 50 and y1 - y0 > 50:
+                img = img[y0:y1, x0:x1]
+                logger.debug("OCR normalization: cropped whitespace border")
+
+        pil_norm = Image.fromarray(img)
+        return pil_norm
+    except Exception as e:
+        logger.debug(f"OCR normalization failed: {e}")
+        return pil_img
 
 
 def _preprocess_pil_image(pil_img: Image.Image, upscale: bool = True) -> Image.Image:
     """Apply grayscale, denoise, adaptive threshold, sharpen, upscale and contrast."""
     try:
-        # Convert to OpenCV image
+        pil_img = _normalize_pil_image_for_ocr(pil_img)
         img = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
-        # Grayscale
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
-        # Denoise (tuned for noisy/scanned images)
-        denoised = cv2.fastNlMeansDenoising(gray, None, h=14, templateWindowSize=7, searchWindowSize=21)
-
-        # Adaptive threshold (helps with mixed contrast) - smaller block for small fonts
+        denoised = cv2.fastNlMeansDenoising(gray, None, h=12, templateWindowSize=7, searchWindowSize=21)
         th = cv2.adaptiveThreshold(denoised, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                                   cv2.THRESH_BINARY, 11, 8)
+                                   cv2.THRESH_BINARY, 13, 9)
 
         proc = th
         logger.debug(f"Preprocessing: adaptiveThreshold applied; upscale={upscale}")
 
-        # Upscale small images (more aggressive for small-font tables)
         if upscale:
             h, w = proc.shape
             scale = 1.0
@@ -205,18 +251,13 @@ def _preprocess_pil_image(pil_img: Image.Image, upscale: bool = True) -> Image.I
                 proc = cv2.resize(proc, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
                 logger.debug(f"Preprocessing: resized image with scale={scale}")
 
-        # Convert back to PIL for sharpening/contrast
-        pil_proc = Image.fromarray(proc)
-        pil_proc = pil_proc.convert("L")
-
-        # Sharpen (tuned)
+        pil_proc = Image.fromarray(proc).convert("L")
         pil_proc = pil_proc.filter(ImageFilter.UnsharpMask(radius=1, percent=200, threshold=1))
         logger.debug("Preprocessing: UnsharpMask applied (r=1,p=200,t=1)")
 
-        # Contrast
         enhancer = ImageEnhance.Contrast(pil_proc)
-        pil_proc = enhancer.enhance(1.5)
-        logger.debug("Preprocessing: Contrast enhanced by factor 1.5")
+        pil_proc = enhancer.enhance(1.6)
+        logger.debug("Preprocessing: Contrast enhanced by factor 1.6")
 
         return pil_proc
     except Exception as e:

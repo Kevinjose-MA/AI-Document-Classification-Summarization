@@ -5,6 +5,7 @@ export default function ChatBox({ documentId }) {
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
+  const [expandedCitations, setExpandedCitations] = useState({});
   const scrollRef = useRef(null);
 
   useEffect(() => {
@@ -20,17 +21,25 @@ export default function ChatBox({ documentId }) {
     setLoading(true);
 
     try {
+      // Build conversation history for context (exclude current message)
+      const conversationHistory = messages.map((m) => ({
+        role: m.role === 'user' ? 'user' : 'assistant',
+        content: m.text,
+      }));
+
       const res = await api.post(`/documents/chat`, {
         document_ids: [documentId],
         questions: [q],
+        conversation_history: conversationHistory,
         include_ocr: true,
         top_k: 5,
       });
       const answer = res.data.answers?.[0] || "No answer returned.";
-      setMessages((m) => [...m, { role: "assistant", text: answer }]);
+      const citations = res.data.citations?.[0] || [];
+      setMessages((m) => [...m, { role: "assistant", text: answer, citations }]);
     } catch (err) {
       const errMsg = err?.response?.data?.detail || err.message || "Request failed.";
-      setMessages((m) => [...m, { role: "assistant", text: `Error: ${errMsg}` }]);
+      setMessages((m) => [...m, { role: "assistant", text: `Error: ${errMsg}`, citations: [] }]);
     } finally {
       setLoading(false);
     }
@@ -41,6 +50,11 @@ export default function ChatBox({ documentId }) {
       e.preventDefault();
       send();
     }
+  };
+
+  const toggleCitation = (msgIndex, citIndex) => {
+    const key = `${msgIndex}-${citIndex}`;
+    setExpandedCitations((prev) => ({ ...prev, [key]: !prev[key] }));
   };
 
   return (
@@ -59,11 +73,38 @@ export default function ChatBox({ documentId }) {
             }
           </div>
         )}
-        {messages.map((m, i) => (
-          <div key={i} className={`max-w-full ${m.role === 'user' ? 'text-right' : 'text-left'}`}>
+        {messages.map((m, msgIndex) => (
+          <div key={msgIndex} className={`max-w-full ${m.role === 'user' ? 'text-right' : 'text-left'}`}>
             <div className={`${m.role === 'user' ? 'inline-block bg-blue-600 text-white' : 'inline-block bg-gray-50 text-gray-800'} px-3 py-2 rounded-lg`}>
               <div className="whitespace-pre-wrap text-sm">{m.text}</div>
             </div>
+            
+            {m.role === 'assistant' && m.citations && m.citations.length > 0 && (
+              <div className="mt-2 space-y-1">
+                {m.citations.map((cit, citIndex) => {
+                  const citKey = `${msgIndex}-${citIndex}`;
+                  const isExpanded = expandedCitations[citKey];
+                  const sourceLabel = cit.source_kind === 'ocr_text' ? 'OCR' : cit.source_kind === 'clause' ? 'Clause' : 'Summary';
+                  
+                  return (
+                    <div
+                      key={citIndex}
+                      className="text-xs bg-blue-50 border border-blue-200 rounded px-2 py-1.5 cursor-pointer hover:bg-blue-100 transition"
+                      onClick={() => toggleCitation(msgIndex, citIndex)}
+                    >
+                      <div className="font-semibold text-blue-900">
+                        📄 {cit.filename} <span className="text-xs text-blue-700">({sourceLabel})</span>
+                      </div>
+                      {isExpanded && (
+                        <div className="mt-1 text-gray-700 border-t border-blue-200 pt-1 max-h-20 overflow-y-auto">
+                          {cit.text_snippet}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
         ))}
       </div>

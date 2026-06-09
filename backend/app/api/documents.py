@@ -18,6 +18,7 @@ from pydantic import BaseModel
 
 from app.models.models import DocumentModel, EmailCredentialModel, AuditLogModel
 from app.services.ingestion import ingest_upload, ingest_bytes
+from app.services.rate_limiter import rate_limiter
 from app.services import storage as gridfs_storage
 from app.services import blob_storage
 from app.services.embeddings import encode_texts
@@ -31,9 +32,15 @@ security  = HTTPBearer()
 SUPPORTED_EXTS = {".pdf", ".docx", ".doc", ".xlsx", ".xls", ".png", ".jpg", ".jpeg"}
 
 
+class ChatMessage(BaseModel):
+    role: str  # "user" or "assistant"
+    content: str
+
+
 class DocumentChatRequest(BaseModel):
     document_ids: Optional[List[str]] = None
     questions: List[str]
+    conversation_history: Optional[List[ChatMessage]] = None  # Multi-turn memory
     top_k: int = 5
     include_ocr: bool = True
 
@@ -140,7 +147,7 @@ def _search_relevant_contexts(question: str, entries: list, top_k: int = 5):
     return selected
 
 
-def _build_chat_prompt(question: str, contexts: list):
+def _build_chat_prompt(question: str, contexts: list, conversation_history: Optional[list] = None):
     snippets = []
     for entry in contexts:
         text = entry["text"].strip()
@@ -150,10 +157,25 @@ def _build_chat_prompt(question: str, contexts: list):
             f"[Document: {entry['filename']} | Source: {entry['kind']} | DocID: {entry['document_id']}]\n{text}"
         )
     context_block = "\n\n".join(snippets)
+    
+    # Build conversation history section (last 3 exchanges for token efficiency)
+    history_block = ""
+    if conversation_history:
+        recent_history = conversation_history[-6:]  # Last 3 exchanges (user + assistant pairs)
+        if recent_history:
+            history_lines = []
+            for msg in recent_history:
+                role = msg.get("role", "").upper()
+                content = msg.get("content", "").strip()
+                if role and content:
+                    history_lines.append(f"{role}: {content}")
+            if history_lines:
+                history_block = "CONVERSATION HISTORY:\n" + "\n".join(history_lines) + "\n\n"
 
     return (
         "You are a secure document assistant. Use only the provided document excerpts and OCR text to answer the question. "
         "Do not hallucinate or invent facts. If the answer cannot be found in the provided context, say so clearly.\n\n"
+        f"{history_block}"
         f"CONTEXT:\n{context_block}\n\n"
         f"QUESTION:\n{question}\n\n"
         "Answer concisely and cite the relevant document filename when appropriate."
@@ -186,7 +208,26 @@ def _log(document_id, filename, event, detail, agent="system",
 # ── Manual upload ──────────────────────────────────────────────────────────────
 @router.post("/documents/upload")
 async def upload_document(file: UploadFile = File(...), user=Depends(get_current_user)):
-    result = await ingest_upload(file, user_id=str(user["user_id"]), purpose="Manual Upload")
+    user_id = str(user["user_id"])
+
+    file_bytes = await file.read()
+    file_size_mb = len(file_bytes) / (1024 * 1024)
+    allowed, quota_msg = rate_limiter.check_upload_quota(user_id, file_size_mb)
+    if not allowed:
+        raise HTTPException(status_code=429, detail=quota_msg)
+
+    rate_limiter.record_upload(user_id)
+
+    result = await asyncio.to_thread(
+        ingest_bytes,
+        file_bytes,
+        file.filename,
+        user_id,
+        "Manual Upload",
+        file.content_type,
+        "manual",
+        None,
+    )
     return result
 
 
@@ -306,6 +347,14 @@ async def get_document(doc_id: str, user=Depends(get_current_user)):
 
 @router.post("/documents/chat")
 async def chat_documents(request: DocumentChatRequest, user=Depends(get_current_user)):
+    user_id = str(user["user_id"])
+    
+    # Check question quota for each question
+    for _ in request.questions:
+        allowed, quota_msg = rate_limiter.check_question_quota(user_id)
+        if not allowed:
+            raise HTTPException(status_code=429, detail=quota_msg)
+    
     documents = await asyncio.to_thread(_query_user_documents, user, request.document_ids or None)
     if not documents:
         raise HTTPException(404, "No accessible documents found for this request.")
@@ -315,22 +364,47 @@ async def chat_documents(request: DocumentChatRequest, user=Depends(get_current_
         raise HTTPException(404, "No searchable document content found for the requested documents.")
 
     answers = []
-    sources = []
+    citations_list = []
+    
     for question in request.questions:
+        # Record question for quota tracking
+        rate_limiter.record_question(user_id)
+        
         contexts = await asyncio.to_thread(_search_relevant_contexts, question, context_entries, request.top_k)
         if not contexts:
             answers.append("No relevant document content found for this question.")
-            sources.append([])
+            citations_list.append([])
             continue
 
-        prompt = _build_chat_prompt(question, contexts)
+        prompt = _build_chat_prompt(question, contexts, request.conversation_history)
         answer = await asyncio.to_thread(generate_text_completion, prompt, max_tokens=220)
         answers.append(answer or "No answer could be generated from the selected documents.")
-        sources.append(list({ctx["filename"] for ctx in contexts}))
+        
+        # Build detailed citations from retrieved contexts
+        citations = []
+        for ctx in contexts:
+            citation = {
+                "document_id": ctx["document_id"],
+                "filename": ctx["filename"],
+                "source_kind": ctx["kind"],  # "clause", "ocr_text", or "summary"
+                "text_snippet": ctx["text"][:300] + ("..." if len(ctx["text"]) > 300 else ""),
+            }
+            citations.append(citation)
+        
+        # Deduplicate citations by (document_id, source_kind)
+        seen_citations = set()
+        unique_citations = []
+        for cit in citations:
+            key = (cit["document_id"], cit["source_kind"])
+            if key not in seen_citations:
+                seen_citations.add(key)
+                unique_citations.append(cit)
+        
+        citations_list.append(unique_citations)
 
     return {
         "answers": answers,
-        "sources": sources,
+        "citations": citations_list,
         "document_count": len(documents),
     }
 
@@ -376,6 +450,15 @@ async def download_document(doc_id: str, password: str = None, user=Depends(get_
         media_type=content_type,
         headers={"Content-Disposition": f'attachment; filename="{doc.filename}"'},
     )
+
+
+# ── Usage Stats ────────────────────────────────────────────────────────────────
+@router.get("/documents/usage/today")
+async def get_usage_stats(user=Depends(get_current_user)):
+    """Get current usage statistics for the authenticated user."""
+    user_id = str(user["user_id"])
+    usage = rate_limiter.get_user_usage_today(user_id)
+    return usage
 
 
 async def _load_file(doc) -> tuple:
